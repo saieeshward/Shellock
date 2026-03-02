@@ -1,0 +1,41 @@
+[
+  {
+    "match": "ERESOLVE unable to resolve dependency tree",
+    "fix": "Peer dependency conflict. Try: npm install --legacy-peer-deps",
+    "docs": "https://docs.npmjs.com/cli/v10/commands/npm-install#strict-peer-deps"
+  },
+  {
+    "match": "Cannot find module",
+    "fix": "Module not found. Try: npm install <module-name>",
+    "extract": "Cannot find module '(\\S+)'"
+  },
+  {
+    "match": "ENOENT.*package\\.json",
+    "fix": "No package.json found. Run: npm init -y",
+    "docs": "https://docs.npmjs.com/cli/v10/commands/npm-init"
+  },
+  {
+    "match": "EACCES: permission denied",
+    "fix": "Permission error. Do NOT use sudo with npm. Fix permissions: https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally",
+    "docs": "https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally"
+  },
+  {
+    "match": "ERR! code E404",
+    "fix": "Package not found on npm registry. Check the package name for typos.",
+    "docs": "https://www.npmjs.com/"
+  },
+  {
+    "match": "ETARGET.*No matching version found",
+    "fix": "Requested version doesn't exist. Check available versions: npm view <package> versions",
+    "extract": "No matching version found for (\\S+)"
+  },
+  {
+    "match": "npm WARN deprecated",
+    "fix": "Package is deprecated. Check for an alternative or newer version.",
+    "extract": "deprecated (\\S+)"
+  },
+  {
+    "match": "ECONNREFUSED|ETIMEDOUT|EAI_AGAIN",
+    "fix": "Network error. Check your internet connection. If behind a proxy: npm config set proxy http://proxy:port"
+  }
+]

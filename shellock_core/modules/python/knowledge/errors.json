@@ -1,0 +1,51 @@
+[
+  {
+    "match": "externally-managed-environment",
+    "fix": "System Python is externally managed (PEP 668). Create a virtual environment: python3 -m venv .venv && source .venv/bin/activate",
+    "docs": "https://peps.python.org/pep-0668/"
+  },
+  {
+    "match": "No module named '(\\w+)'",
+    "fix": "Package not installed. Run: pip install {module}",
+    "extract": "No module named '(\\w+)'"
+  },
+  {
+    "match": "pip's dependency resolver does not currently",
+    "fix": "Dependency conflict detected. Try: pip install --upgrade conflicting-package, or create a fresh virtual environment.",
+    "docs": "https://pip.pypa.io/en/stable/topics/dependency-resolution/"
+  },
+  {
+    "match": "Could not find a version that satisfies",
+    "fix": "Package version not found. Check the package name and version on PyPI. Try: pip install package-name (without version pin).",
+    "docs": "https://pypi.org/"
+  },
+  {
+    "match": "Permission denied",
+    "fix": "Permission error. Do NOT use sudo with pip. Create a virtual environment instead: python3 -m venv .venv && source .venv/bin/activate"
+  },
+  {
+    "match": "Cannot uninstall .* It is a distutils installed project",
+    "fix": "This package was installed by the system package manager. Create a fresh virtual environment to avoid conflicts: python3 -m venv .venv --clear",
+    "docs": "https://pip.pypa.io/en/stable/topics/dependency-resolution/"
+  },
+  {
+    "match": "ERROR: Could not build wheels for",
+    "fix": "Build failed. You may need system-level build dependencies. On macOS: xcode-select --install. On Linux: apt install build-essential python3-dev",
+    "docs": "https://pip.pypa.io/en/stable/cli/pip_install/#build-system-interface"
+  },
+  {
+    "match": "ConnectionError|HTTPSConnectionPool|Max retries exceeded",
+    "fix": "Network error during package download. Check your internet connection. If behind a proxy, configure pip: pip config set global.proxy http://proxy:port",
+    "docs": "https://pip.pypa.io/en/stable/topics/configuration/"
+  },
+  {
+    "match": "SyntaxError: invalid syntax",
+    "fix": "Python syntax error. Check if you're using the correct Python version for this package.",
+    "extract": "File \"(.+)\", line (\\d+)"
+  },
+  {
+    "match": "ImportError: cannot import name",
+    "fix": "Import error — the package is installed but the specific name doesn't exist. This often means a version mismatch. Try upgrading: pip install --upgrade package-name",
+    "extract": "cannot import name '(\\w+)' from '(\\w+)'"
+  }
+]

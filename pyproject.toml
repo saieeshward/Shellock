@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shellock"
+version = "0.1.0"
+description = "Adaptive Terminal Environment Orchestrator"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Saieeshwar"},
+]
+
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "ollama>=0.3.0",
+]
+
+[project.optional-dependencies]
+cloud = ["litellm>=1.0.0"]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
+
+[project.scripts]
+shellock = "shellock_core.cli:app"
+
+[project.entry-points."shellock.modules"]
+python = "shellock_core.modules.python:PythonModule"
+node = "shellock_core.modules.node:NodeModule"
+
+[tool.setuptools.packages.find]
+include = ["shellock_core*"]
