@@ -56,7 +56,7 @@ def load_module(name: str) -> ShellockModule | None:
     # Try built-in modules first
     if name in BUILTIN_MODULES:
         try:
-            mod = importlib.import_module(f"shellock.modules.{name}")
+            mod = importlib.import_module(f"shellock_core.modules.{name}")
             instance = mod.Module()
             _module_cache[name] = instance
             return instance

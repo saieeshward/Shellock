@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,12 +94,24 @@ def validate_commands(
         if blocked:
             continue
 
-        # Check allowlist (command prefix must match)
+        # Check allowlist (command or its basename must match a prefix)
+        # Handles full paths like /Users/.../bin/pip install → matches "pip install"
         allowed = False
+        cmd_str = cmd.command.strip()
         for prefix in allowed_commands:
-            if cmd.command.strip().startswith(prefix):
+            if cmd_str.startswith(prefix):
                 allowed = True
                 break
+            # Check if the basename of the first token matches
+            # e.g. "/path/to/bin/pip install foo" → "pip install foo"
+            parts = cmd_str.split(None, 1)
+            if parts:
+                basename_cmd = Path(parts[0]).name
+                rest = parts[1] if len(parts) > 1 else ""
+                normalized = f"{basename_cmd} {rest}".strip()
+                if normalized.startswith(prefix):
+                    allowed = True
+                    break
 
         if not allowed:
             logger.warning("BLOCKED: '%s' not in module allowlist", cmd.command)

@@ -46,10 +46,11 @@ class PythonModule(ShellockModule):
         "pip freeze",
         "python -m venv",
         "python3 -m venv",
+        "python3.",           # matches python3.11, python3.12, etc.
         "pyenv install",
         "pyenv local",
         "pyenv global",
-        "source",  # for venv activation hints
+        "source",             # for venv activation hints
     ]
 
     blocked_patterns = [
