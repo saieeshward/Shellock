@@ -17,8 +17,12 @@ File layout:
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
+import sys as _sys
+if _sys.platform != "win32":
+    import fcntl as _fcntl
+else:
+    _fcntl = None
 import json
 import logging
 import re
@@ -218,8 +222,9 @@ def fingerprint_error(stderr: str) -> str:
     normalized = stderr.strip()
     # Strip line numbers
     normalized = re.sub(r"line \d+", "line N", normalized)
-    # Strip file paths
+    # Strip file paths (Unix and Windows)
     normalized = re.sub(r"/[\w/\-.]+/", "/.../", normalized)
+    normalized = re.sub(r"[A-Za-z]:\\[\w\\\-. ]+\\", r"...\\", normalized)
     # Strip timestamps
     normalized = re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", "TIMESTAMP", normalized)
     # Extract core error class if present
@@ -279,28 +284,29 @@ def _compact_history(project_path: str, history: ProjectHistory) -> None:
 
 
 def _write_json(path: Path, data: Any) -> None:
-    """Write JSON with file locking for concurrency safety."""
+    """Write JSON with file locking for concurrency safety (Unix) or simple write (Windows)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(data, indent=2, default=str)
+    content = json.dumps(data, indent=2, default=str) + "\n"
 
-    with open(path, "w") as f:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            f.write(content)
-            f.write("\n")
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except BlockingIOError:
-            # Another Shellock process is writing — wait up to 5s
-            import time
-            for _ in range(50):
-                time.sleep(0.1)
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    f.write(content)
-                    f.write("\n")
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                    return
-                except BlockingIOError:
-                    continue
-            logger.error("Could not acquire lock on %s after 5s", path)
-            raise
+    if _fcntl is not None:
+        with open(path, "w") as f:
+            try:
+                _fcntl.flock(f.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                f.write(content)
+                _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
+            except BlockingIOError:
+                import time
+                for _ in range(50):
+                    time.sleep(0.1)
+                    try:
+                        _fcntl.flock(f.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                        f.write(content)
+                        _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
+                        return
+                    except BlockingIOError:
+                        continue
+                logger.error("Could not acquire lock on %s after 5s", path)
+                raise
+    else:
+        # Windows: no file locking (single-user CLI, low concurrency risk)
+        path.write_text(content)

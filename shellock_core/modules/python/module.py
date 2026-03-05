@@ -47,6 +47,8 @@ class PythonModule(ShellockModule):
         "python -m venv",
         "python3 -m venv",
         "python3.",           # matches python3.11, python3.12, etc.
+        "pip.exe install",
+        "pip.exe uninstall",
         "pyenv install",
         "pyenv local",
         "pyenv global",
@@ -201,27 +203,29 @@ class PythonModule(ShellockModule):
     # ── Command dispatch ────────────────────────────────────────
 
     def dispatch(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
+        import os
+        from pathlib import Path as _Path
+
         env_path = spec.get("env_path", ".venv")
         runtime = spec.get("runtime_version", "3")
         packages = spec.get("packages", [])
 
+        is_windows = os.name == "nt"
+        venv = _Path(env_path)
+
+        # Cross-platform python command and paths
+        python_cmd = "python" if is_windows else (f"python{runtime}" if runtime else "python3")
+        pip_path = str(venv / ("Scripts" if is_windows else "bin") / "pip")
+        rollback_rm = f"rmdir /s /q {env_path}" if is_windows else f"rm -rf {env_path}"
+
         commands = []
 
         # Create virtual environment
-        python_cmd = f"python{runtime}" if runtime else "python3"
         commands.append({
             "command": f"{python_cmd} -m venv {env_path}",
             "impact": "safe",
             "description": f"Create virtual environment at {env_path}",
-            "rollback_command": f"rm -rf {env_path}",
-        })
-
-        # Upgrade pip inside the venv
-        pip_path = f"{env_path}/bin/pip"
-        commands.append({
-            "command": f"{pip_path} install --upgrade pip",
-            "impact": "safe",
-            "description": "Upgrade pip to latest version",
+            "rollback_command": rollback_rm,
         })
 
         # Install packages
@@ -250,8 +254,10 @@ class PythonModule(ShellockModule):
 
         # Post hooks
         for hook in spec.get("post_hooks", []):
+            scripts_dir = "Scripts" if is_windows else "bin"
+            hook_cmd = str(venv / scripts_dir / hook) if not _Path(hook).is_absolute() else hook
             commands.append({
-                "command": f"{env_path}/bin/{hook}" if not hook.startswith("/") else hook,
+                "command": hook_cmd,
                 "impact": "caution",
                 "description": f"Post-hook: {hook}",
             })
@@ -275,9 +281,16 @@ class PythonModule(ShellockModule):
 
         # Externally managed environment (PEP 668)
         if "externally-managed-environment" in stderr:
+            import os as _os
+            if _os.name == "nt":
+                activate = r".venv\Scripts\activate.bat"
+                python_cmd = "python"
+            else:
+                activate = "source .venv/bin/activate"
+                python_cmd = "python3"
             return {
                 "action": "configure",
-                "commands": ["python3 -m venv .venv", "source .venv/bin/activate"],
+                "commands": [f"{python_cmd} -m venv .venv", activate],
                 "reasoning": "System Python is externally managed (PEP 668). Use a virtual environment instead.",
             }
 
