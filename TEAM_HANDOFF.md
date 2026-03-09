@@ -161,7 +161,7 @@ This is **instant, 100% accurate, works offline**, and runs before any LLM call.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                     CLI Layer (cli.py)                   │
-│  init │ fix │ list │ rollback │ modules │ config │ ver  │
+│  init │ fix │ list │ envs │ use │ rollback │ modules │  │
 └───────┬────────────────────────────────────┬────────────┘
         │                                    │
         ▼                                    ▼
@@ -272,7 +272,7 @@ Layer 4: "I DON'T KNOW" (honest)
 ## 7. Data Flow: `shellock init`
 
 ```
-User: shellock init "python 3.11 fastapi project with black"
+User: shellock init "python 3.11 fastapi project with black" --name my-api
     │
     ├─ 1. Check onboarding (first run only)
     │
@@ -288,6 +288,7 @@ User: shellock init "python 3.11 fastapi project with black"
     ├─ 4. Generate spec
     │     ├─ LLM available? → llm.generate_spec() with SPEC_PROMPT
     │     └─ No LLM? → module.build_spec() (keyword matching)
+    │     └─ --name flag? → override env_id with user's name
     │
     ├─ 5. Validate spec
     │     └─ module.validate_spec() → warnings ("numpy already installed")
@@ -297,6 +298,7 @@ User: shellock init "python 3.11 fastapi project with black"
     │     ├─ Warnings from validation
     │     ├─ LLM reasoning
     │     └─ User: yes / no / edit / explain
+    │     └─ (skipped with --yes flag)
     │
     ├─ 7. Generate commands
     │     └─ module.dispatch() → [venv create, pip upgrade, pip install]
@@ -307,6 +309,7 @@ User: shellock init "python 3.11 fastapi project with black"
     ├─ 9. Approval gate #2: Show commands
     │     ├─ Green (SAFE) / Yellow (CAUTION) / Red (BLOCKED)
     │     └─ User approves safe and/or cautioned commands
+    │     └─ (skipped with --yes flag)
     │
     ├─ 10. Execute
     │      └─ dispatcher.execute_commands() → subprocess, sequential
@@ -314,8 +317,21 @@ User: shellock init "python 3.11 fastapi project with black"
     ├─ 11. Record audit trail
     │      └─ registry.record_action(type=INIT, spec, commands, result)
     │
-    └─ 12. Update preferences
-           └─ profile.record_choice("tools", "black") etc.
+    ├─ 12. Update preferences
+    │      └─ profile.record_choice("tools", "black") etc.
+    │
+    └─ 13. Show activation hint
+           └─ "source ~/.shellock/envs/my-api/bin/activate"
+```
+
+### Full Environment Workflow
+
+```
+shellock init "python ML project" --name ml-env    # Create & name
+shellock envs                                       # List all environments
+shellock use ml-env                                 # Activate (spawns subshell)
+# ... work in the environment ...
+exit                                                # Deactivate & return to normal shell
 ```
 
 ---
@@ -408,16 +424,25 @@ pytest tests/ -v
 # Try it out (with Ollama running)
 shellock init "python 3.11 fastapi project with black"
 
+# Name the environment explicitly
+shellock init "python ML project with numpy pandas" --name ml-env
+
 # Auto-approve (no prompts)
-shellock init "python 3.11 data science with pandas numpy" --yes
+shellock init "python 3.11 data science with pandas numpy" --yes --name ds-env
 
 # Dry run (preview only)
 shellock init "node react app with typescript" --dry-run
 
+# List all environments
+shellock envs
+
+# View env details + activation command
+shellock use ml-env
+
 # Diagnose an error
 shellock fix "ModuleNotFoundError: No module named 'fastapi'"
 
-# View history
+# View project action history (timeline format)
 shellock list
 
 # Configure LLM
@@ -433,7 +458,7 @@ shellock config llm_model llama3.2:3b
 - [x] ShellockModule ABC with 8 abstract methods
 - [x] Python module — full venv lifecycle, introspection, 10 error patterns
 - [x] Node module — npm lifecycle, introspection, 8 error patterns
-- [x] CLI with 7 commands (init, fix, list, rollback, modules, config, version)
+- [x] CLI with 9 commands (init, fix, list, envs, use, rollback, modules, config, version)
 - [x] Ollama integration (local LLM, tested with llama3.2:3b)
 - [x] litellm integration (cloud LLM, code ready)
 - [x] Template fallback (no LLM mode, keyword matching)
@@ -444,11 +469,29 @@ shellock config llm_model llama3.2:3b
 - [x] Rich terminal UI + plain-text fallback
 - [x] First-run onboarding wizard
 - [x] Command safety (allowlist, blocked patterns, two-gate approval)
-- [x] `--yes` flag for automated/scripted usage
+- [x] `--yes` / `-y` flag for automated/scripted usage (skips both approval gates)
+- [x] `--name` / `-n` flag for explicit environment naming
 - [x] `--dry-run` flag for preview
+- [x] `shellock envs` — list all environments with Python version, packages, and activation command
+- [x] `shellock use <name>` — show environment details and activation hint
+- [x] Post-init activation hint (shows how to activate the newly created env)
 - [x] File locking for concurrent access
 - [x] History compaction
 - [x] 37 tests passing
+
+### Potential Next Steps
+
+### `shellock list` — Timeline Format
+
+The `shellock list` command shows project history in a compact timeline:
+
+```
+++ INIT  ml-env  OK  2026-03-02 19:10  (act-5df7ca)
+   numpy, pandas, scikit-learn
+   ~/.shellock/envs/ml-env
+```
+
+Each entry shows: action type, env name, result, timestamp, and action ID, with packages and path on subsequent lines.
 
 ### Potential Next Steps
 
@@ -503,10 +546,34 @@ All models have `extra='forbid'` — any unexpected field from LLM output is cau
 
 | Command | Description | Key Flags |
 |---------|-------------|-----------|
-| `shellock init "desc"` | Create environment from description | `--module`, `--template`, `--dry-run`, `--yes` |
+| `shellock init "desc"` | Create environment from description | `--module`, `--template`, `--dry-run`, `--yes`/`-y`, `--name`/`-n` |
 | `shellock fix "error"` | Diagnose and fix an error | |
-| `shellock list` | Show project action history | |
+| `shellock list` | Show project action history (timeline format) | |
+| `shellock envs` | List all environments with versions & packages | |
+| `shellock use <name>` | Activate environment (spawns subshell) | |
 | `shellock rollback [id]` | Undo a previous action | |
 | `shellock modules` | List available modules | |
 | `shellock config [key] [val]` | View/set configuration | |
 | `shellock version` | Show version | |
+
+### Environment Lifecycle
+
+```bash
+# Create with explicit name
+shellock init "python data science project" --name ds-env --yes
+
+# List all environments
+shellock envs
+# ┌──────────┬─────────┬──────────────────────────────┬──────────────────────────────────────────┐
+# │ Name     │ Python  │ Packages                     │ Activate                                 │
+# ├──────────┼─────────┼──────────────────────────────┼──────────────────────────────────────────┤
+# │ ds-env   │ 3.11.8  │ numpy, pandas, scikit-learn   │ source ~/.shellock/envs/ds-env/bin/activate │
+# │ ml-env   │ 3.12.1  │ torch, transformers            │ source ~/.shellock/envs/ml-env/bin/activate │
+# └──────────┴─────────┴──────────────────────────────┴──────────────────────────────────────────┘
+
+# Activate an environment (spawns a subshell)
+shellock use ds-env
+
+# Deactivate — just exit the subshell
+exit
+```

@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -148,10 +147,16 @@ def execute_commands(
     if env_override:
         env.update(env_override)
 
+    # Progress callback for UI
+    total = sum(1 for c in commands if c.impact != Impact.BLOCKED)
+    step = 0
+
     for cmd in commands:
         if cmd.impact == Impact.BLOCKED:
             logger.info("Skipping blocked command: %s", cmd.command)
             continue
+
+        step += 1
 
         if dry_run:
             result.results.append(CommandResult(
@@ -163,6 +168,8 @@ def execute_commands(
             ))
             continue
 
+        # Show progress
+        _show_progress(step, total, cmd.description or cmd.command)
         logger.info("Executing: %s", cmd.command)
         cmd_result = _run_command(cmd.command, work_dir, env)
         result.results.append(cmd_result)
@@ -170,11 +177,14 @@ def execute_commands(
         if not cmd_result.success:
             result.all_succeeded = False
             result.first_error = cmd_result
+            _show_step_result(False, cmd.description or cmd.command)
             logger.error(
                 "Command failed (exit %d): %s\nstderr: %s",
                 cmd_result.exit_code, cmd.command, cmd_result.stderr[:200],
             )
             break  # stop on first failure
+        else:
+            _show_step_result(True, cmd.description or cmd.command)
 
     return result
 
@@ -219,3 +229,23 @@ def _run_command(
             stderr=str(e),
             success=False,
         )
+
+
+def _show_progress(step: int, total: int, description: str) -> None:
+    """Show execution progress."""
+    try:
+        from rich.console import Console
+        Console().print(f"  [dim][{step}/{total}][/] {description}...", end="")
+    except ImportError:
+        print(f"  [{step}/{total}] {description}...", end="")
+
+
+def _show_step_result(success: bool, description: str) -> None:
+    """Show step completion."""
+    try:
+        from rich.console import Console
+        icon = "[green]done[/]" if success else "[red]failed[/]"
+        Console().print(f" {icon}")
+    except ImportError:
+        label = "done" if success else "failed"
+        print(f" {label}")

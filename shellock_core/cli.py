@@ -11,9 +11,7 @@ Commands:
 
 from __future__ import annotations
 
-import json
 import os
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -37,6 +35,44 @@ def _check_onboarding() -> None:
         run_onboarding()
 
 
+def _sanitize_env_id(raw: str) -> str:
+    """Sanitize an env ID: lowercase, replace spaces/special chars with hyphens, strip edges."""
+    import re
+    sanitized = raw.strip().lower()
+    sanitized = re.sub(r"[^a-z0-9._-]", "-", sanitized)  # replace non-safe chars
+    sanitized = re.sub(r"-{2,}", "-", sanitized)          # collapse multiple hyphens
+    sanitized = sanitized.strip("-")                       # no leading/trailing hyphens
+    return sanitized or "shellock-env"
+
+
+def _activate_env(env_name: str, env_path: str) -> None:
+    """Spawn a subshell with the given environment activated."""
+    import subprocess
+    from shellock_core.core import ui
+
+    is_windows = os.name == "nt"
+    bin_dir = Path(env_path) / ("Scripts" if is_windows else "bin")
+
+    if not bin_dir.is_dir():
+        ui.show_warning(f"Environment not ready (no {'Scripts' if is_windows else 'bin'}/ directory).")
+        ui.show_info(f"Activate later with: shellock use {env_name}")
+        return
+
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(env_path)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    env.pop("PYTHONHOME", None)
+    env["SHELLOCK_ENV"] = env_name
+
+    shell = os.environ.get("SHELL", "/bin/sh")
+    ui.show_success(f"Entering '{env_name}' — type 'exit' to leave.")
+
+    try:
+        subprocess.run([shell, "-i"], env=env)
+    except KeyboardInterrupt:
+        pass
+
+
 # ── init ────────────────────────────────────────────────────────
 
 
@@ -50,6 +86,9 @@ def init(
     ),
     template: Optional[str] = typer.Option(
         None, "--template", "-t", help="Use a template instead of LLM (no AI needed)"
+    ),
+    name: Optional[str] = typer.Option(
+        None, "--name", "-n", help="Explicitly name the environment (overrides auto-generated name)"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen without executing"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve without prompts"),
@@ -73,21 +112,20 @@ def init(
 
     # Detect or select module
     if module:
-        active_module = get_module(module)
+        try:
+            active_module = get_module(module)
+        except Exception:
+            ui.show_error(f"Module '{module}' not found. Run 'shellock modules' to see available modules.")
+            raise typer.Exit(1)
     else:
         detected = detect_modules(cwd)
         if not detected:
-            # No project files found — try to infer from description
-            ui.show_info("No project files detected. Inferring module from description...")
-            # Default to python for now
             active_module = get_module("python")
         elif len(detected) == 1:
             active_module = detected[0]
-            ui.show_info(f"Detected module: {active_module.name}")
         else:
-            ui.show_info(f"Detected modules: {', '.join(m.name for m in detected)}")
-            ui.show_info(f"Using first match: {detected[0].name}")
             active_module = detected[0]
+    ui.show_info(f"Module: {active_module.name}")
 
     # Gather context
     sys_context = context.detect_system()
@@ -106,7 +144,8 @@ def init(
     else:
         llm = LLMClient(config, sys_context.llm_tier)
         if llm.is_available():
-            ui.show_info("Generating environment spec...")
+            tier_label = "Ollama (local)" if sys_context.llm_tier.value == "local" else sys_context.llm_tier.value
+            ui.show_info(f"LLM: {config.llm_model} via {tier_label}")
             spec_dict = llm.generate_spec(
                 description=description,
                 module_name=active_module.name,
@@ -115,14 +154,26 @@ def init(
                 project_context=proj_context,
             )
             if spec_dict is None:
-                ui.show_warning("LLM could not generate a valid spec. Falling back to module defaults.")
+                ui.show_warning("LLM returned invalid spec — falling back to templates.")
                 spec_dict = active_module.build_spec(description, full_context)
         else:
-            ui.show_warning("No LLM available. Using module defaults.")
+            import shutil
+            if shutil.which("ollama"):
+                ui.show_warning("Ollama installed but not running. Start with: ollama serve")
             spec_dict = active_module.build_spec(description, full_context)
 
     # Build the EnvSpec
     try:
+        if name:
+            spec_dict["env_id"] = _sanitize_env_id(name)
+            spec_dict["env_path"] = str(Path.home() / ".shellock" / "envs" / spec_dict["env_id"])
+        else:
+            # Sanitize LLM-generated env_id too
+            spec_dict["env_id"] = _sanitize_env_id(spec_dict.get("env_id", "shellock-env"))
+            
+        # Overwrite module with the strictly detected one to prevent LLM hallucinations
+        spec_dict["module"] = active_module.name
+
         # Ensure packages are PackageSpec objects
         if "packages" in spec_dict:
             spec_dict["packages"] = [
@@ -136,26 +187,21 @@ def init(
 
     # Ensure env_path is set
     if not spec.env_path:
-        from pathlib import Path
-
         spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
+
+    # Check if environment already exists
+    if Path(spec.env_path).is_dir() and not dry_run:
+        if yes:
+            ui.show_warning(f"Environment '{spec.env_id}' already exists — will be overwritten.")
+        else:
+            ui.show_warning(f"Environment '{spec.env_id}' already exists.")
+            ui.show_info("Use a different --name, or run 'shellock destroy' to remove it first.")
+            raise typer.Exit(1)
 
     # Validate spec against system reality
     warnings = active_module.validate_spec(spec.model_dump())
 
-    # Show approval screen
-    if yes:
-        ui.show_spec_preview(spec, warnings)
-        approved = True
-    else:
-        approved = ui.show_spec_approval(spec, warnings)
-    if not approved:
-        ui.show_info("Cancelled.")
-        raise typer.Exit(0)
-
-    spec.approved = True
-
-    # Generate commands from module
+    # Generate commands from module (needed for unified approval screen)
     commands = active_module.dispatch(spec.model_dump())
     command_objects = [
         Command.model_validate(c) if isinstance(c, dict) else Command(command=str(c))
@@ -169,27 +215,47 @@ def init(
         active_module.blocked_patterns,
     )
 
-    # Show command approval
+    # Single approval screen: spec + commands together (loop for edit/explain)
     if yes:
-        approve_safe = True
-        approve_caution = True
-        ui.show_commands_preview(validated)
+        ui.show_plan_preview(spec, validated, warnings)
+        approved = True
     else:
-        approve_safe, approve_caution = ui.show_commands(validated)
-
-    if not approve_safe:
+        while True:
+            result = ui.show_approval(spec, validated, warnings)
+            if result is True:
+                approved = True
+                break
+            elif result is False:
+                approved = False
+                break
+            elif result == "edit":
+                spec = ui.prompt_edit_spec(spec)
+                # Re-validate and re-generate commands after editing
+                warnings = active_module.validate_spec(spec.model_dump())
+                commands = active_module.dispatch(spec.model_dump())
+                command_objects = [
+                    Command.model_validate(c) if isinstance(c, dict) else Command(command=str(c))
+                    for c in commands
+                ]
+                validated = dispatcher.validate_commands(
+                    command_objects,
+                    active_module.allowed_commands,
+                    active_module.blocked_patterns,
+                )
+                continue
+            elif result == "explain":
+                ui.show_explain(spec)
+                continue
+    if not approved:
         ui.show_info("Cancelled.")
         raise typer.Exit(0)
 
-    # Filter commands based on approval
-    to_run = []
-    for cmd in validated:
-        from shellock_core.core.schemas import Impact
+    spec.approved = True
 
-        if cmd.impact == Impact.SAFE:
-            to_run.append(cmd)
-        elif cmd.impact == Impact.CAUTION and approve_caution:
-            to_run.append(cmd)
+    # Filter: run safe + caution (user already approved the full plan)
+    from shellock_core.core.schemas import Impact
+
+    to_run = [cmd for cmd in validated if cmd.impact != Impact.BLOCKED]
 
     # Execute
     result = dispatcher.execute_commands(
@@ -201,12 +267,13 @@ def init(
 
     # Record in audit trail
     registry.save_spec(cwd, spec)
-    action_id = registry.record_action(
+    registry.record_action(
         project_path=cwd,
         action_type=ActionType.INIT,
         spec=spec.model_dump(mode="json"),
         commands_run=[r.command for r in result.results],
         result="success" if result.all_succeeded else "failed",
+        failed_stderr=result.failed_stderr if not result.all_succeeded else None,
     )
 
     # Update user profile preferences
@@ -216,11 +283,18 @@ def init(
     registry.save_profile(profile)
 
     if result.all_succeeded:
-        ui.show_success(f"Environment '{spec.env_id}' created successfully")
-        ui.show_info(f"Action logged: {action_id}")
+        ui.show_success(f"Environment '{spec.env_id}' created successfully!")
+
+        # Auto-activate: offer to drop into the environment
+        if not dry_run and spec.env_path and not yes:
+            if ui.prompt_activate(spec.env_id):
+                _activate_env(spec.env_id, spec.env_path)
+        elif not dry_run and spec.env_path:
+            ui.show_info(f"Activate with: shellock use {spec.env_id}")
     else:
-        ui.show_error(f"Setup failed. Run 'shellock fix' to diagnose.")
-        ui.show_info(f"Error: {result.failed_stderr[:200] if result.failed_stderr else 'unknown'}")
+        ui.show_error("Setup failed. Run 'shellock fix' to diagnose.")
+        if result.failed_stderr:
+            ui.show_info(f"Error: {result.failed_stderr[:200]}")
 
 
 # ── fix ─────────────────────────────────────────────────────────
@@ -255,16 +329,26 @@ def fix(
         ui.show_info("Run 'shellock init' first.")
         raise typer.Exit(1)
 
-    active_module = get_module(spec.module)
+    try:
+        active_module = get_module(spec.module)
+    except Exception:
+        ui.show_error(f"Module '{spec.module}' not available.")
+        raise typer.Exit(1)
 
-    # If no error text provided, check last action
+    # If no error text provided, check last action for stored stderr
     if error_text is None:
         recent = registry.get_recent_actions(cwd, n=1)
         if recent and recent[0].get("result") == "failed":
-            # Try to get stderr from the last failed action
-            error_text = "Last action failed. Please paste the error output."
+            stored_stderr = recent[0].get("failed_stderr")
+            if stored_stderr:
+                error_text = stored_stderr
+                ui.show_info(f"Using error from last failed action: {error_text[:100]}")
+            else:
+                ui.show_error("Last action failed but no error output was stored.")
+                ui.show_info("Usage: shellock fix \"paste the error message here\"")
+                raise typer.Exit(1)
         else:
-            ui.show_error("No error text provided. Paste the error or pipe it in.")
+            ui.show_error("No recent failure found. Provide the error text.")
             ui.show_info("Usage: shellock fix \"error message here\"")
             raise typer.Exit(1)
 
@@ -327,7 +411,8 @@ def fix(
     if not diagnosis:
         llm = LLMClient(config, sys_context.llm_tier)
         if llm.is_available():
-            ui.show_info("Consulting LLM for diagnosis...")
+            tier_label = "Ollama (local)" if sys_context.llm_tier.value == "local" else sys_context.llm_tier.value
+            ui.show_info(f"Consulting LLM ({config.llm_model} via {tier_label})...")
             llm_result = llm.diagnose_error(
                 stderr=error_text,
                 system_context=sys_context.model_dump(),
@@ -340,6 +425,10 @@ def fix(
                     fix=llm_result.get("fix"),
                     error_fingerprint=fingerprint,
                 )
+        else:
+            import shutil
+            if shutil.which("ollama"):
+                ui.show_info("Ollama is installed but not running — skipping LLM diagnosis. Start with: ollama serve")
 
     # Layer 4: "I don't know"
     if not diagnosis:
@@ -406,6 +495,7 @@ def list_history() -> None:
 
     actions = [a.model_dump(mode="json") for a in history.actions]
     ui.show_history(actions)
+    ui.show_info("Environments are typically located in ~/.shellock/envs/")
 
 
 # ── rollback ────────────────────────────────────────────────────
@@ -488,6 +578,86 @@ def modules() -> None:
             table.add_row(name, "[dim]failed to load[/]", "")
 
     console.print(table)
+
+
+# ── envs ───────────────────────────────────────────────────────
+
+
+@app.command()
+def envs() -> None:
+    """List all Shellock environments."""
+    from shellock_core.core import ui
+
+    envs_dir = Path.home() / ".shellock" / "envs"
+
+    try:
+        if not envs_dir.is_dir() or not any(envs_dir.iterdir()):
+            ui.show_info("No environments found.")
+            ui.show_info("Create one with: shellock init \"python 3.11 project with requests\"")
+            raise typer.Exit(0)
+    except PermissionError:
+        ui.show_error(f"Permission denied reading {envs_dir}")
+        raise typer.Exit(1)
+
+    ui.show_envs(envs_dir)
+
+
+# ── use ────────────────────────────────────────────────────────
+
+
+@app.command()
+def use(
+    env_name: str = typer.Argument(..., help="Name of the environment to activate"),
+) -> None:
+    """Activate a Shellock environment (spawns a subshell)."""
+    from shellock_core.core import ui
+
+    envs_dir = Path.home() / ".shellock" / "envs"
+    env_path = envs_dir / env_name
+
+    if not env_path.is_dir():
+        ui.show_error(f"Environment '{env_name}' not found.")
+        if envs_dir.is_dir():
+            available = [d.name for d in envs_dir.iterdir() if d.is_dir()]
+            if available:
+                ui.show_info(f"Available: {', '.join(available)}")
+        raise typer.Exit(1)
+
+    ui.show_env_details(env_path)
+    _activate_env(env_name, str(env_path))
+
+
+# ── destroy ─────────────────────────────────────────────────────
+
+
+@app.command()
+def destroy(
+    env_name: str = typer.Argument(..., help="Name of the environment to remove"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+) -> None:
+    """Remove a Shellock environment permanently."""
+    import shutil as _shutil
+    from shellock_core.core import ui
+
+    envs_dir = Path.home() / ".shellock" / "envs"
+    env_path = envs_dir / env_name
+
+    if not env_path.is_dir():
+        ui.show_error(f"Environment '{env_name}' not found.")
+        raise typer.Exit(1)
+
+    if not force:
+        from rich.console import Console
+        console = Console()
+        r = console.input(
+            f"  [red]Permanently delete '{env_name}'?[/] [dim]\\[yes/no][/] → "
+        ).strip().lower()
+        if r not in ("yes", "y"):
+            ui.show_info("Cancelled.")
+            raise typer.Exit(0)
+
+    _shutil.rmtree(env_path)
+    ui.show_success(f"Environment '{env_name}' removed.")
 
 
 # ── config ──────────────────────────────────────────────────────

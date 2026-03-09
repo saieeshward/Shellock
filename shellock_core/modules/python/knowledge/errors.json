@@ -47,5 +47,14 @@
     "match": "ImportError: cannot import name",
     "fix": "Import error — the package is installed but the specific name doesn't exist. This often means a version mismatch. Try upgrading: pip install --upgrade package-name",
     "extract": "cannot import name '(\\w+)' from '(\\w+)'"
+  },
+  {
+    "match": "python\\d[.\\d]*: command not found",
+    "fix": "The requested Python version is not installed on your system. Check available versions with: python3 --version. Install the missing version via pyenv (pyenv install <version>) or your system package manager, or re-run shellock init with an available Python version.",
+    "docs": "https://github.com/pyenv/pyenv#installation"
+  },
+  {
+    "match": "No such file or directory.*python",
+    "fix": "The Python binary could not be found. Your virtual environment may reference a Python version that was uninstalled. Recreate the environment: shellock init \"your description\" --name env-name"
   }
 ]

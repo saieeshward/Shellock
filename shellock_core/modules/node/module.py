@@ -50,14 +50,15 @@ class NodeModule(ShellockModule):
         "nvm use",
         "node -e",
         "npx",
+        "brew install",       # for installing node/nvm on macOS
+        "curl -fsSL",         # for nvm installer
+        "curl -o-",           # for nvm installer (alternate form)
     ]
 
     blocked_patterns = [
         r"sudo\s+",
         r"rm\s+-rf\s+/",
         r"npm\s+publish",  # don't accidentally publish
-        r"\|\s*sh$",
-        r"\|\s*bash$",
     ]
 
     suggestable_tools = [
@@ -187,11 +188,36 @@ class NodeModule(ShellockModule):
         introspection = self.introspect(".")
 
         if not introspection.get("node_available"):
+            install_hint = _node_install_hint()
             warnings.append({
-                "level": "error",
-                "message": "Node.js is not installed on this system",
-                "suggestion": "Install via nvm, brew, or https://nodejs.org",
+                "level": "caution",
+                "message": f"Node.js is not installed. Will install it. ({install_hint})",
+                "suggestion": install_hint,
             })
+        else:
+            # Check if a specific Node version is requested
+            runtime = spec.get("runtime_version")
+            if runtime:
+                current = introspection.get("node_version", "")
+                # current is like "v20.11.0" — extract major
+                current_major = current.lstrip("v").split(".")[0] if current else ""
+                if current_major and current_major != runtime:
+                    if introspection.get("nvm_available"):
+                        warnings.append({
+                            "level": "caution",
+                            "message": (
+                                f"Node {current} installed, but v{runtime} requested. "
+                                f"Will install Node {runtime} via nvm."
+                            ),
+                        })
+                    else:
+                        warnings.append({
+                            "level": "caution",
+                            "message": (
+                                f"Node {current} installed, but v{runtime} requested. "
+                                f"Will install nvm, then Node {runtime}."
+                            ),
+                        })
 
         return warnings
 
