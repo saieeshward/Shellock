@@ -242,7 +242,7 @@ class ShelllockConfig(BaseModel):
 
     schema_version: str = "1.0"
     llm_provider: str = "ollama"
-    llm_model: str = "llama3.2"
+    llm_model: str = "llama3.2:3b"
     llm_api_key: str | None = Field(default=None, description="Only for cloud providers")
     plain_mode: bool = Field(default=False, description="Disable Rich formatting")
     history_compaction_threshold: int = 200

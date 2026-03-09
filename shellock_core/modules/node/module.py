@@ -85,7 +85,7 @@ class NodeModule(ShellockModule):
 
     # ── System introspection ────────────────────────────────────
 
-    def introspect(self, project_path: str) -> dict[str, Any]:
+    def introspect(self, project_path: str | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {
             "node_available": shutil.which("node") is not None,
             "node_version": None,

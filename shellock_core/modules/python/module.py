@@ -97,7 +97,8 @@ class PythonModule(ShellockModule):
 
     # ── System introspection ────────────────────────────────────
 
-    def introspect(self, project_path: str) -> dict[str, Any]:
+    def introspect(self, project_path: str | None = None) -> dict[str, Any]:
+        project_path = project_path or "."
         result: dict[str, Any] = {
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "python_path": sys.executable,
@@ -172,7 +173,7 @@ class PythonModule(ShellockModule):
     def validate_spec(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
         """Cross-check spec against installed packages."""
         warnings = []
-        introspection = self.introspect(spec.get("env_path", "."))
+        introspection = self.introspect(".")
         installed = introspection.get("installed_packages", {})
 
         packages = spec.get("packages", [])
@@ -206,7 +207,7 @@ class PythonModule(ShellockModule):
         import os
         from pathlib import Path as _Path
 
-        env_path = spec.get("env_path", ".venv")
+        env_path = spec.get("env_path") or ".venv"
         runtime = spec.get("runtime_version", "3")
         packages = spec.get("packages", [])
 

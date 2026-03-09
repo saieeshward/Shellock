@@ -101,6 +101,76 @@ def show_spec_approval(spec: EnvSpec, warnings: list[dict[str, Any]] | None = No
     return response in ("yes", "y", "")
 
 
+def show_spec_preview(spec: EnvSpec, warnings: list[dict[str, Any]] | None = None) -> None:
+    """Display the spec without asking for approval (--yes mode)."""
+    if _plain_mode():
+        _plain_spec_approval(spec, warnings)  # reuse display, ignore return
+        return
+
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+    console.print()
+    console.print(
+        Panel(
+            f"[bold cyan]Environment Preview[/] — [dim]{spec.module}[/]  [green](auto-approved)[/]",
+            border_style="cyan",
+            padding=(0, 2),
+        )
+    )
+
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("Key", style="dim", width=16)
+    table.add_column("Value")
+    table.add_row("env_id", f"[bold]{spec.env_id}[/]")
+    table.add_row("module", spec.module)
+    if spec.runtime_version:
+        table.add_row("runtime", spec.runtime_version)
+    if spec.packages:
+        table.add_row("packages", ", ".join(p.to_install_string() for p in spec.packages))
+    if spec.env_path:
+        table.add_row("env path", spec.env_path)
+    console.print(table)
+
+    if warnings:
+        for w in warnings:
+            level = w.get("level", "info")
+            msg = w.get("message", "")
+            if level == "caution":
+                console.print(f"  [yellow]⚠ CAUTION[/]  {msg}")
+            elif level == "error":
+                console.print(f"  [red]✗ ERROR[/]    {msg}")
+            else:
+                console.print(f"  [dim]ℹ INFO[/]     {msg}")
+
+    if spec.reasoning:
+        console.print(f"\n  [dim]Reasoning: {spec.reasoning}[/]")
+    console.print()
+
+
+def show_commands_preview(commands: list[Command]) -> None:
+    """Display commands without asking for approval (--yes mode)."""
+    if _plain_mode():
+        for cmd in commands:
+            print(f"  [{cmd.impact.value.upper()}] {cmd.command} — {cmd.description}")
+        return
+
+    from rich.console import Console
+
+    console = Console()
+    console.print()
+    for cmd in commands:
+        if cmd.impact == Impact.SAFE:
+            console.print(f"  [green]✓ SAFE[/]     {cmd.command}  [dim]({cmd.description})[/]")
+        elif cmd.impact == Impact.CAUTION:
+            console.print(f"  [yellow]⚠ CAUTION[/]  {cmd.command}  [dim]({cmd.description})[/]")
+        elif cmd.impact == Impact.BLOCKED:
+            console.print(f"  [red]✗ BLOCKED[/]  {cmd.command}  [dim]({cmd.description})[/]")
+    console.print()
+
+
 def show_commands(commands: list[Command]) -> tuple[bool, bool]:
     """Display commands with impact classification.
 

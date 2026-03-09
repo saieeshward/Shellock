@@ -52,6 +52,7 @@ def init(
         None, "--template", "-t", help="Use a template instead of LLM (no AI needed)"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen without executing"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve without prompts"),
 ) -> None:
     """Create a new environment from a natural-language description."""
     from shellock_core.core import context, dispatcher, registry, ui
@@ -133,11 +134,21 @@ def init(
         ui.show_error(f"Invalid spec: {e}")
         raise typer.Exit(1)
 
+    # Ensure env_path is set
+    if not spec.env_path:
+        from pathlib import Path
+
+        spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
+
     # Validate spec against system reality
     warnings = active_module.validate_spec(spec.model_dump())
 
     # Show approval screen
-    approved = ui.show_spec_approval(spec, warnings)
+    if yes:
+        ui.show_spec_preview(spec, warnings)
+        approved = True
+    else:
+        approved = ui.show_spec_approval(spec, warnings)
     if not approved:
         ui.show_info("Cancelled.")
         raise typer.Exit(0)
@@ -159,7 +170,12 @@ def init(
     )
 
     # Show command approval
-    approve_safe, approve_caution = ui.show_commands(validated)
+    if yes:
+        approve_safe = True
+        approve_caution = True
+        ui.show_commands_preview(validated)
+    else:
+        approve_safe, approve_caution = ui.show_commands(validated)
 
     if not approve_safe:
         ui.show_info("Cancelled.")
