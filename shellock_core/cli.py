@@ -64,11 +64,17 @@ def _activate_env(env_name: str, env_path: str) -> None:
     env.pop("PYTHONHOME", None)
     env["SHELLOCK_ENV"] = env_name
 
-    shell = os.environ.get("SHELL", "/bin/sh")
+    if is_windows:
+        shell = os.environ.get("COMSPEC", "cmd.exe")
+        shell_args = [shell]
+    else:
+        shell = os.environ.get("SHELL", "/bin/sh")
+        shell_args = [shell, "-i"]
+
     ui.show_success(f"Entering '{env_name}' — type 'exit' to leave.")
 
     try:
-        subprocess.run([shell, "-i"], env=env)
+        subprocess.run(shell_args, env=env)
     except KeyboardInterrupt:
         pass
 

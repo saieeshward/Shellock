@@ -151,10 +151,14 @@ def _detect_llm_model() -> str | None:
             )
             if result.returncode == 0:
                 lines = result.stdout.strip().split("\n")
-                if len(lines) > 1:
-                    # First model listed (skip header)
-                    model_name = lines[1].split()[0]
-                    return model_name
+                # Skip header, skip embedding-only models (can't do generation)
+                for line in lines[1:]:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    model_name = parts[0]
+                    if "embed" not in model_name.lower():
+                        return model_name
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
     return None
