@@ -84,14 +84,22 @@ def run_onboarding() -> UserProfile:
                 config.llm_model = system_info.llm_model
     elif system_info.llm_tier == LLMTier.CLOUD:
         ui.show_info("")
-        ui.show_info("No local LLM found. Options:")
-        ui.show_info("  1. Install Ollama (recommended, private, offline)")
-        ui.show_info("  2. Configure cloud LLM later: shellock config set llm.provider openai")
-        ui.show_info("  3. Template-only mode (no AI)")
+        ui.show_info("No local LLM found, but internet is available.")
+        ui.show_info("Shellock can use Gemini 2.0 Flash (free) as a cloud fallback.")
+        config = _prompt_gemini_key(config)
     else:
         ui.show_info("")
         ui.show_info("No LLM available. Running in template-only mode.")
         ui.show_info("Install Ollama later for the full experience.")
+
+    # Also offer Gemini key if local LLM was found (as a fallback)
+    if system_info.llm_tier == LLMTier.LOCAL and not config.llm_api_key:
+        ui.show_info("")
+        ui.show_info("Optional: Add a Gemini API key for cloud fallback when Ollama is offline.")
+        config = _prompt_gemini_key(config)
+
+    # ── Phase 4: Shell activation function ────────────────────
+    _offer_shell_activation(system_info.shell)
 
     # ── Save ────────────────────────────────────────────────────
     profile.onboarding_complete = True
@@ -100,9 +108,102 @@ def run_onboarding() -> UserProfile:
 
     ui.show_info("")
     ui.show_success("Profile saved to ~/.shellock/profile.json")
-    ui.show_success("Ready. Run: shellock init \"describe your project\"")
+    ui.show_success("Ready. Run: shellock setup \"describe your project\"")
 
     return profile
+
+
+SHELL_ACTIVATION_SNIPPET = '''
+# Shellock shell integration
+shellock_activate() {
+    local env_name="${1:-}"
+    if [ -z "$env_name" ]; then
+        echo "Usage: shellock_activate <env-name>"
+        return 1
+    fi
+    local env_path="$HOME/.shellock/envs/$env_name"
+    if [ ! -d "$env_path" ]; then
+        echo "Environment '$env_name' not found."
+        return 1
+    fi
+    export VIRTUAL_ENV="$env_path"
+    export PATH="$env_path/bin:$PATH"
+    unset PYTHONHOME
+    export SHELLOCK_ENV="$env_name"
+    echo "Activated '$env_name'"
+}
+
+shellock_deactivate() {
+    if [ -n "$SHELLOCK_ENV" ]; then
+        # Remove env bin from PATH
+        PATH=$(echo "$PATH" | sed "s|$HOME/.shellock/envs/$SHELLOCK_ENV/bin:||")
+        unset VIRTUAL_ENV SHELLOCK_ENV
+        echo "Deactivated"
+    fi
+}
+'''
+
+
+def _offer_shell_activation(shell: str) -> None:
+    """Offer to install shell activation functions."""
+    from pathlib import Path
+
+    ui.show_info("")
+    ui.show_info("Shellock can add shell functions (shellock_activate / shellock_deactivate)")
+    ui.show_info("to your shell config for quick environment switching.")
+
+    rc_file = None
+    if "zsh" in shell:
+        rc_file = Path.home() / ".zshrc"
+    elif "bash" in shell:
+        rc_file = Path.home() / ".bashrc"
+
+    if rc_file is None:
+        ui.show_info(f"Unknown shell ({shell}) — skipping shell integration.")
+        return
+
+    try:
+        from rich.console import Console
+        r = Console().input(
+            f"  [dim]Add to {rc_file.name}?[/] [dim]\\[yes/no][/] → "
+        ).strip().lower()
+    except (ImportError, EOFError):
+        r = input(f"  Add to {rc_file.name}? [yes/no] → ").strip().lower()
+
+    if r in ("yes", "y"):
+        # Check if already installed
+        existing = rc_file.read_text() if rc_file.exists() else ""
+        if "shellock_activate" in existing:
+            ui.show_info("Shell functions already installed.")
+            return
+
+        with open(rc_file, "a") as f:
+            f.write(SHELL_ACTIVATION_SNIPPET)
+        ui.show_success(f"Added to {rc_file.name}. Restart your shell or run: source {rc_file}")
+    else:
+        ui.show_info("Skipped. You can add them manually later.")
+
+
+def _prompt_gemini_key(config: "ShelllockConfig") -> "ShelllockConfig":
+    """Prompt the user for a Gemini API key."""
+    from shellock_core.core.schemas import ShelllockConfig as _Cfg
+    try:
+        from rich.console import Console
+        key = Console().input(
+            "  [dim]Gemini API key (get free at https://aistudio.google.com/apikey)[/]\n"
+            "  [dim]Paste key or press Enter to skip:[/] → "
+        ).strip()
+    except (ImportError, EOFError):
+        key = input("  Gemini API key (Enter to skip): ").strip()
+
+    if key:
+        config.llm_api_key = key
+        config.llm_provider = "gemini"
+        config.llm_model = "gemini/gemini-2.0-flash"
+        ui.show_success("Gemini API key saved.")
+    else:
+        ui.show_info("Skipped. You can add it later: shellock config llm_api_key YOUR_KEY")
+    return config
 
 
 def _ask_question(q: dict[str, Any]) -> str | None:

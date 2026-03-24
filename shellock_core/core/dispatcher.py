@@ -195,25 +195,54 @@ def _run_command(
     env: dict[str, str],
     timeout: int = 300,
 ) -> CommandResult:
-    """Run a single shell command and capture output."""
+    """Run a single shell command with live output streaming."""
+    import io
+    import select
+    import sys
+    import threading
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
             cwd=cwd,
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
         )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def _read_stream(stream: io.TextIOBase, buf: list[str]) -> None:
+            for line in iter(stream.readline, ""):
+                buf.append(line)
+                # Stream live to terminal (dimmed)
+                try:
+                    from rich.console import Console
+                    Console().print(f"    [dim]{line.rstrip()}[/]")
+                except ImportError:
+                    print(f"    {line.rstrip()}")
+
+        t_out = threading.Thread(target=_read_stream, args=(proc.stdout, stdout_lines))
+        t_err = threading.Thread(target=_read_stream, args=(proc.stderr, stderr_lines))
+        t_out.start()
+        t_err.start()
+
+        proc.wait(timeout=timeout)
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
         return CommandResult(
             command=command,
             exit_code=proc.returncode,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
+            stdout="".join(stdout_lines),
+            stderr="".join(stderr_lines),
             success=proc.returncode == 0,
         )
     except subprocess.TimeoutExpired:
+        proc.kill()
         return CommandResult(
             command=command,
             exit_code=-1,

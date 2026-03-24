@@ -69,8 +69,12 @@ def load_profile() -> UserProfile:
     """Load the global user profile, creating a default if missing."""
     ensure_shellock_home()
     if PROFILE_PATH.exists():
-        data = json.loads(PROFILE_PATH.read_text())
-        return UserProfile.model_validate(data)
+        try:
+            data = json.loads(PROFILE_PATH.read_text())
+            return UserProfile.model_validate(data)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("Corrupted profile.json: %s — backing up and starting fresh", e)
+            _backup_corrupted(PROFILE_PATH)
     return UserProfile()
 
 
@@ -88,8 +92,12 @@ def load_config() -> ShelllockConfig:
     """Load Shellock configuration."""
     ensure_shellock_home()
     if CONFIG_PATH.exists():
-        data = json.loads(CONFIG_PATH.read_text())
-        return ShelllockConfig.model_validate(data)
+        try:
+            data = json.loads(CONFIG_PATH.read_text())
+            return ShelllockConfig.model_validate(data)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("Corrupted config.json: %s — backing up and starting fresh", e)
+            _backup_corrupted(CONFIG_PATH)
     return ShelllockConfig()
 
 
@@ -106,8 +114,12 @@ def load_history(project_path: str) -> ProjectHistory:
     """Load the project's action history."""
     history_file = Path(project_path) / ".shellock" / "history.json"
     if history_file.exists():
-        data = json.loads(history_file.read_text())
-        return ProjectHistory.model_validate(data)
+        try:
+            data = json.loads(history_file.read_text())
+            return ProjectHistory.model_validate(data)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("Corrupted history.json: %s — backing up and starting fresh", e)
+            _backup_corrupted(history_file)
     return ProjectHistory(project=str(Path(project_path).resolve()))
 
 
@@ -237,7 +249,218 @@ def fingerprint_error(stderr: str) -> str:
     return hashlib.md5(normalized.encode()).hexdigest()[:8]
 
 
+# ── Snapshots ──────────────────────────────────────────────────
+
+
+def save_snapshot(env_path: str, label: str = "pre-fix") -> Path | None:
+    """Save a snapshot of the environment's installed packages before a fix."""
+    import shutil
+    import subprocess as _sp
+
+    env = Path(env_path)
+    if not env.is_dir():
+        return None
+
+    # Disk space guard: warn if less than 500MB free
+    try:
+        stat = shutil.disk_usage(str(SHELLOCK_HOME))
+        free_mb = stat.free / (1024 * 1024)
+        if free_mb < 500:
+            logger.warning("Low disk space: %.0fMB free. Pruning old snapshots.", free_mb)
+            _prune_old_snapshots(30)  # prune snapshots older than 30 days
+    except Exception:
+        pass
+
+    snapshots_dir = SHELLOCK_HOME / "snapshots" / env.name
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap_file = snapshots_dir / f"{label}-{ts}.json"
+
+    snapshot: dict[str, Any] = {"timestamp": ts, "label": label, "env": str(env)}
+
+    # Try pip freeze
+    pip_path = env / "bin" / "pip"
+    if not pip_path.exists():
+        pip_path = env / "Scripts" / "pip.exe"
+    if pip_path.exists():
+        try:
+            result = _sp.run(
+                [str(pip_path), "freeze"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                snapshot["pip_freeze"] = result.stdout.strip().split("\n")
+        except Exception:
+            pass
+
+    # Try npm ls
+    pkg_json = env / "package.json"
+    if pkg_json.exists():
+        try:
+            result = _sp.run(
+                ["npm", "ls", "--json", "--depth=0"],
+                capture_output=True, text=True, timeout=15, cwd=str(env),
+            )
+            if result.returncode == 0:
+                snapshot["npm_ls"] = json.loads(result.stdout)
+        except Exception:
+            pass
+
+    _write_json(snap_file, snapshot)
+    return snap_file
+
+
+# ── Lock files ─────────────────────────────────────────────────
+
+
+def write_lock_file(env_path: str, module_name: str) -> Path | None:
+    """Write a lock file capturing exact installed versions."""
+    import subprocess as _sp
+
+    env = Path(env_path)
+    if not env.is_dir():
+        return None
+
+    lock_file = env / "shellock.lock"
+    lock_data: dict[str, Any] = {
+        "locked_at": datetime.now().isoformat(),
+        "module": module_name,
+        "packages": {},
+    }
+
+    if module_name == "python":
+        pip_path = env / "bin" / "pip"
+        if not pip_path.exists():
+            pip_path = env / "Scripts" / "pip.exe"
+        if pip_path.exists():
+            try:
+                result = _sp.run(
+                    [str(pip_path), "freeze"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        if "==" in line:
+                            name, ver = line.split("==", 1)
+                            lock_data["packages"][name] = ver
+            except Exception:
+                pass
+    elif module_name == "node":
+        try:
+            result = _sp.run(
+                ["npm", "ls", "--json", "--depth=0"],
+                capture_output=True, text=True, timeout=15, cwd=str(env),
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                for name, info in data.get("dependencies", {}).items():
+                    lock_data["packages"][name] = info.get("version", "unknown")
+        except Exception:
+            pass
+
+    _write_json(lock_file, lock_data)
+    return lock_file
+
+
+# ── Security scanning ──────────────────────────────────────────
+
+
+def run_security_scan(env_path: str, module_name: str) -> dict[str, Any]:
+    """Run pip-audit or npm audit and return results."""
+    import shutil
+    import subprocess as _sp
+
+    results: dict[str, Any] = {"scanned": False, "vulnerabilities": [], "tool": None}
+
+    if module_name == "python":
+        pip_path = Path(env_path) / "bin" / "pip"
+        if not pip_path.exists():
+            pip_path = Path(env_path) / "Scripts" / "pip.exe"
+
+        # Try pip-audit first
+        if shutil.which("pip-audit"):
+            results["tool"] = "pip-audit"
+            try:
+                result = _sp.run(
+                    ["pip-audit", "--format=json", f"--python={pip_path.parent / 'python'}"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                results["scanned"] = True
+                if result.returncode != 0 and result.stdout:
+                    vulns = json.loads(result.stdout)
+                    results["vulnerabilities"] = vulns
+            except Exception:
+                pass
+        else:
+            # Fallback: pip check for broken deps
+            results["tool"] = "pip-check"
+            try:
+                result = _sp.run(
+                    [str(pip_path), "check"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                results["scanned"] = True
+                if result.returncode != 0:
+                    results["vulnerabilities"] = [{"issue": line} for line in result.stdout.strip().split("\n") if line]
+            except Exception:
+                pass
+
+    elif module_name == "node":
+        results["tool"] = "npm-audit"
+        try:
+            result = _sp.run(
+                ["npm", "audit", "--json"],
+                capture_output=True, text=True, timeout=60,
+                cwd=env_path,
+            )
+            results["scanned"] = True
+            if result.stdout:
+                audit_data = json.loads(result.stdout)
+                vulns = audit_data.get("vulnerabilities", {})
+                results["vulnerabilities"] = [
+                    {"name": name, "severity": info.get("severity", "unknown")}
+                    for name, info in vulns.items()
+                ]
+        except Exception:
+            pass
+
+    return results
+
+
 # ── Private helpers ─────────────────────────────────────────────
+
+
+def _prune_old_snapshots(max_age_days: int = 30) -> int:
+    """Remove snapshots older than max_age_days. Returns count of pruned files."""
+    snapshots_dir = SHELLOCK_HOME / "snapshots"
+    if not snapshots_dir.is_dir():
+        return 0
+    pruned = 0
+    now = datetime.now()
+    for snap_file in snapshots_dir.rglob("*.json"):
+        try:
+            age_days = (now - datetime.fromtimestamp(snap_file.stat().st_mtime)).days
+            if age_days > max_age_days:
+                snap_file.unlink()
+                pruned += 1
+        except Exception:
+            pass
+    if pruned:
+        logger.info("Pruned %d old snapshots (>%d days)", pruned, max_age_days)
+    return pruned
+
+
+def _backup_corrupted(path: Path) -> None:
+    """Back up a corrupted file to <filename>.bak and remove the original."""
+    bak = path.with_suffix(path.suffix + ".bak")
+    try:
+        import shutil
+        shutil.copy2(path, bak)
+        path.unlink()
+        logger.info("Backed up corrupted %s to %s", path.name, bak.name)
+    except Exception as e:
+        logger.error("Failed to backup corrupted file: %s", e)
 
 
 def _update_error_frequency(

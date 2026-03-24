@@ -73,6 +73,35 @@ def _activate_env(env_name: str, env_path: str) -> None:
         pass
 
 
+def _check_conflicts(spec: "EnvSpec", module: "ShellockModule") -> str | None:
+    """Run a quick conflict pre-detection before install."""
+    import subprocess
+    if module.name == "python" and spec.packages:
+        pkg_names = [p.to_install_string() for p in spec.packages]
+        try:
+            result = subprocess.run(
+                ["pip", "install", "--dry-run", "--report", "-", *pkg_names],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0 and "conflict" in result.stderr.lower():
+                return result.stderr[:200]
+        except Exception:
+            pass
+    return None
+
+
+def _infer_module_from_description(description: str) -> "ShellockModule":
+    """Infer the correct module from description keywords when no trigger files exist."""
+    from shellock_core.core.module_loader import get_module
+
+    desc_lower = description.lower()
+    node_keywords = {"npm", "node", "next", "nextjs", "next.js", "react", "vue",
+                     "angular", "svelte", "yarn", "pnpm", "express", "typescript"}
+    if any(kw in desc_lower.split() or kw in desc_lower for kw in node_keywords):
+        return get_module("node")
+    return get_module("python")
+
+
 # ── init ────────────────────────────────────────────────────────
 
 
@@ -94,13 +123,14 @@ def init(
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve without prompts"),
 ) -> None:
     """Create a new environment from a natural-language description."""
-    from shellock_core.core import context, dispatcher, registry, ui
+    from shellock_core.core import adaptive, context, dispatcher, registry, ui
     from shellock_core.core.llm import LLMClient
     from shellock_core.core.module_loader import detect_modules, get_module
     from shellock_core.core.schemas import (
         ActionType,
         Command,
         EnvSpec,
+        LLMTier,
         PackageSpec,
     )
 
@@ -117,20 +147,28 @@ def init(
         except Exception:
             ui.show_error(f"Module '{module}' not found. Run 'shellock modules' to see available modules.")
             raise typer.Exit(1)
+        adaptive.announce_module_detection(active_module.name, f"forced via --module {module}")
     else:
         detected = detect_modules(cwd)
         if not detected:
-            active_module = get_module("python")
+            # No trigger files found — infer module from description text
+            active_module = _infer_module_from_description(description)
+            adaptive.announce_module_detection(active_module.name, "inferred from description text")
         elif len(detected) == 1:
             active_module = detected[0]
+            adaptive.announce_module_detection(active_module.name, f"detected trigger files in {cwd}")
         else:
             active_module = detected[0]
+            adaptive.announce_module_detection(active_module.name, f"first of {len(detected)} detected modules")
     ui.show_info(f"Module: {active_module.name}")
 
     # Gather context
     sys_context = context.detect_system()
     proj_context = context.detect_project_context(cwd)
     introspection = active_module.introspect(cwd)
+
+    # Axis 3: System context announcements
+    adaptive.announce_system_adaptations(sys_context.model_dump(), active_module.name)
 
     full_context = {
         "system": sys_context.model_dump(),
@@ -144,8 +182,14 @@ def init(
     else:
         llm = LLMClient(config, sys_context.llm_tier)
         if llm.is_available():
-            tier_label = "Ollama (local)" if sys_context.llm_tier.value == "local" else sys_context.llm_tier.value
-            ui.show_info(f"LLM: {config.llm_model} via {tier_label}")
+            # Show which LLM tier we're using
+            if sys_context.llm_tier == LLMTier.LOCAL and llm._check_ollama():
+                ui.show_info(f"LLM: {config.llm_model} via Ollama (local)")
+            elif config.llm_api_key:
+                ui.show_info(f"LLM: Gemini 2.0 Flash via cloud (free tier)")
+            else:
+                tier_label = sys_context.llm_tier.value
+                ui.show_info(f"LLM: {config.llm_model} via {tier_label}")
             spec_dict = llm.generate_spec(
                 description=description,
                 module_name=active_module.name,
@@ -156,10 +200,21 @@ def init(
             if spec_dict is None:
                 ui.show_warning("LLM returned invalid spec — falling back to templates.")
                 spec_dict = active_module.build_spec(description, full_context)
+            elif not spec_dict.get("packages"):
+                ui.show_warning(
+                    "Shellock couldn't interpret that prompt. "
+                    "Try being more specific, e.g. 'python FastAPI + postgres' or 'npm React + TypeScript'."
+                )
+                ui.show_info("Falling back to template mode...")
+                spec_dict = active_module.build_spec(description, full_context)
         else:
             import shutil
             if shutil.which("ollama"):
                 ui.show_warning("Ollama installed but not running. Start with: ollama serve")
+            if config.llm_api_key:
+                ui.show_info("Trying Gemini cloud fallback...")
+            else:
+                ui.show_info("No LLM available — using template mode.")
             spec_dict = active_module.build_spec(description, full_context)
 
     # Build the EnvSpec
@@ -184,6 +239,12 @@ def init(
     except Exception as e:
         ui.show_error(f"Invalid spec: {e}")
         raise typer.Exit(1)
+
+    # Axis 1: Suggest tools from user preferences
+    current_pkg_names = [p.name for p in spec.packages]
+    suggested = adaptive.suggest_from_preferences(profile, "tools", current_pkg_names)
+    for tool in suggested:
+        spec.packages.append(PackageSpec(name=tool))
 
     # Ensure env_path is set
     if not spec.env_path:
@@ -257,6 +318,14 @@ def init(
 
     to_run = [cmd for cmd in validated if cmd.impact != Impact.BLOCKED]
 
+    # Conflict pre-detection dry run (pip check / npm ls)
+    if not dry_run and spec.packages:
+        conflicts = _check_conflicts(spec, active_module)
+        if conflicts:
+            ui.show_warning(f"Potential conflicts detected: {conflicts}")
+            if not yes:
+                ui.show_info("Proceeding anyway (conflicts may resolve during install).")
+
     # Execute
     result = dispatcher.execute_commands(
         to_run,
@@ -285,6 +354,23 @@ def init(
     if result.all_succeeded:
         ui.show_success(f"Environment '{spec.env_id}' created successfully!")
 
+        # Post-install: lock file + security scan
+        if not dry_run and spec.env_path:
+            lock = registry.write_lock_file(spec.env_path, active_module.name)
+            if lock:
+                ui.show_info(f"Lock file: {lock}")
+
+            scan = registry.run_security_scan(spec.env_path, active_module.name)
+            if scan.get("scanned"):
+                vulns = scan.get("vulnerabilities", [])
+                if vulns:
+                    ui.show_warning(f"Security scan ({scan['tool']}): {len(vulns)} issue(s) found")
+                    for v in vulns[:3]:
+                        if isinstance(v, dict):
+                            ui.show_info(f"  - {v.get('name', v.get('issue', 'unknown'))}")
+                else:
+                    ui.show_success(f"Security scan ({scan['tool']}): no issues found")
+
         # Auto-activate: offer to drop into the environment
         if not dry_run and spec.env_path and not yes:
             if ui.prompt_activate(spec.env_id):
@@ -307,7 +393,7 @@ def fix(
     ),
 ) -> None:
     """Diagnose and fix environment errors using the adaptive loop."""
-    from shellock_core.core import context, dispatcher, registry, ui
+    from shellock_core.core import adaptive, context, dispatcher, registry, ui
     from shellock_core.core.llm import LLMClient
     from shellock_core.core.module_loader import get_module
     from shellock_core.core.schemas import (
@@ -366,7 +452,7 @@ def fix(
     occurrence_count = freq.get("count", 0)
 
     if occurrence_count >= 3:
-        ui.show_warning(f"This error has occurred {occurrence_count} times before.")
+        adaptive.announce_error_escalation(occurrence_count)
         if freq.get("fixes_that_worked"):
             ui.show_info(f"Previously successful fix: {freq['fixes_that_worked'][-1]}")
 
@@ -448,6 +534,12 @@ def fix(
     if should_apply and diagnosis.fix:
         fix_commands = diagnosis.fix.get("commands", [])
         if fix_commands:
+            # Snapshot before applying fix
+            if spec.env_path:
+                snap = registry.save_snapshot(spec.env_path, label="pre-fix")
+                if snap:
+                    ui.show_info(f"Snapshot saved: {snap.name}")
+
             command_objects = [Command(command=c, description="fix command") for c in fix_commands]
             validated = dispatcher.validate_commands(
                 command_objects,
@@ -710,6 +802,370 @@ def version() -> None:
     """Show Shellock version."""
     from shellock_core.core import ui
     ui.show_info(f"Shellock v{__version__}")
+
+
+# ── info ───────────────────────────────────────────────────────
+
+
+@app.command()
+def info(
+    env_name: Optional[str] = typer.Argument(None, help="Environment name (defaults to current project's env)"),
+) -> None:
+    """Show detailed info about an environment."""
+    from shellock_core.core import registry, ui
+
+    if env_name:
+        env_path = Path.home() / ".shellock" / "envs" / env_name
+    else:
+        cwd = os.getcwd()
+        spec = registry.load_spec(cwd)
+        if spec and spec.env_path:
+            env_path = Path(spec.env_path)
+            env_name = spec.env_id
+        else:
+            ui.show_error("No environment found. Provide a name or run from a Shellock project.")
+            raise typer.Exit(1)
+
+    if not env_path.is_dir():
+        ui.show_error(f"Environment '{env_name}' not found at {env_path}")
+        raise typer.Exit(1)
+
+    ui.show_env_details(env_path)
+
+    # Show lock file info if present
+    lock_file = env_path / "shellock.lock"
+    if lock_file.exists():
+        import json as _json
+        lock_data = _json.loads(lock_file.read_text())
+        pkgs = lock_data.get("packages", {})
+        ui.show_info(f"Locked packages: {len(pkgs)}")
+        for name, ver in list(pkgs.items())[:10]:
+            ui.show_info(f"  {name}=={ver}")
+        if len(pkgs) > 10:
+            ui.show_info(f"  ... and {len(pkgs) - 10} more")
+
+
+# ── export ─────────────────────────────────────────────────────
+
+
+@app.command(name="export")
+def export_env(
+    env_name: Optional[str] = typer.Argument(None, help="Environment name"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
+) -> None:
+    """Export an environment spec to a portable JSON file."""
+    import json as _json
+    from shellock_core.core import registry, ui
+
+    cwd = os.getcwd()
+    spec = registry.load_spec(cwd)
+    if spec is None:
+        ui.show_error("No Shellock environment found in this directory.")
+        raise typer.Exit(1)
+
+    export_data = spec.model_dump(mode="json")
+    export_data.pop("approved", None)
+    export_data.pop("created_at", None)
+
+    out_path = output or f"shellock-{spec.env_id}.json"
+    Path(out_path).write_text(_json.dumps(export_data, indent=2) + "\n")
+    ui.show_success(f"Exported to {out_path}")
+
+
+# ── import ─────────────────────────────────────────────────────
+
+
+@app.command(name="import")
+def import_env(
+    file_path: str = typer.Argument(..., help="Path to exported shellock JSON file"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Override environment name"),
+) -> None:
+    """Import an environment from an exported JSON file."""
+    import json as _json
+    from shellock_core.core import registry, ui
+    from shellock_core.core.schemas import EnvSpec
+
+    path = Path(file_path)
+    if not path.exists():
+        ui.show_error(f"File not found: {file_path}")
+        raise typer.Exit(1)
+
+    try:
+        data = _json.loads(path.read_text())
+        if name:
+            data["env_id"] = _sanitize_env_id(name)
+        spec = EnvSpec.model_validate(data)
+    except Exception as e:
+        ui.show_error(f"Invalid spec file: {e}")
+        raise typer.Exit(1)
+
+    ui.show_info(f"Importing environment: {spec.env_id} ({spec.module})")
+    if spec.packages:
+        ui.show_info(f"Packages: {', '.join(p.name for p in spec.packages)}")
+
+    # Delegate to init with the spec's data
+    init(
+        description=spec.reasoning or f"Imported {spec.env_id}",
+        module=spec.module,
+        name=spec.env_id,
+        template=None,
+        dry_run=False,
+        yes=False,
+    )
+
+
+# ── scan ───────────────────────────────────────────────────────
+
+
+@app.command()
+def scan(
+    env_name: Optional[str] = typer.Argument(None, help="Environment name"),
+) -> None:
+    """Run a security scan on an environment."""
+    from shellock_core.core import registry, ui
+
+    if env_name:
+        env_path = str(Path.home() / ".shellock" / "envs" / env_name)
+        module_name = "python"  # default guess
+    else:
+        cwd = os.getcwd()
+        spec = registry.load_spec(cwd)
+        if spec and spec.env_path:
+            env_path = spec.env_path
+            module_name = spec.module
+        else:
+            ui.show_error("No environment found. Provide a name or run from a Shellock project.")
+            raise typer.Exit(1)
+
+    ui.show_info(f"Scanning {env_path}...")
+    results = registry.run_security_scan(env_path, module_name)
+
+    if not results.get("scanned"):
+        ui.show_warning("Could not run security scan. Install pip-audit or ensure npm is available.")
+        return
+
+    vulns = results.get("vulnerabilities", [])
+    if vulns:
+        ui.show_warning(f"Found {len(vulns)} issue(s) via {results['tool']}:")
+        for v in vulns:
+            if isinstance(v, dict):
+                name = v.get("name", v.get("issue", "unknown"))
+                sev = v.get("severity", "")
+                ui.show_info(f"  - {name}" + (f" ({sev})" if sev else ""))
+    else:
+        ui.show_success(f"No vulnerabilities found ({results['tool']})")
+
+
+# ── adopt ──────────────────────────────────────────────────────
+
+
+@app.command()
+def adopt(
+    env_path: str = typer.Argument(..., help="Path to existing virtual environment"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Name for the adopted environment"),
+) -> None:
+    """Adopt an existing virtual environment into Shellock management."""
+    from shellock_core.core import registry, ui
+    from shellock_core.core.schemas import EnvSpec
+
+    path = Path(env_path).resolve()
+    if not path.is_dir():
+        ui.show_error(f"Directory not found: {env_path}")
+        raise typer.Exit(1)
+
+    # Verify it's a venv
+    has_pyvenv = (path / "pyvenv.cfg").exists()
+    has_node = (path / "package.json").exists()
+
+    if not has_pyvenv and not has_node:
+        ui.show_error("This doesn't look like a Python venv or Node project.")
+        raise typer.Exit(1)
+
+    env_name = name or _sanitize_env_id(path.name)
+    module_name = "python" if has_pyvenv else "node"
+
+    # Symlink or copy into shellock envs
+    target = Path.home() / ".shellock" / "envs" / env_name
+    if target.exists():
+        ui.show_error(f"Environment '{env_name}' already exists.")
+        raise typer.Exit(1)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(path)
+
+    # Create spec
+    spec = EnvSpec(
+        env_id=env_name,
+        module=module_name,
+        env_path=str(path),
+        reasoning=f"Adopted from {env_path}",
+        approved=True,
+    )
+    registry.save_spec(os.getcwd(), spec)
+    ui.show_success(f"Adopted '{env_name}' ({module_name}) → {path}")
+
+
+# ── generate ───────────────────────────────────────────────────
+
+generate_app = typer.Typer(help="Generate Dockerfile or CI config from environment")
+app.add_typer(generate_app, name="generate")
+
+
+@generate_app.command()
+def dockerfile(
+    env_name: Optional[str] = typer.Argument(None, help="Environment name"),
+    output: str = typer.Option("Dockerfile", "--output", "-o", help="Output file"),
+) -> None:
+    """Generate a Dockerfile from the current environment."""
+    from shellock_core.core import registry, ui
+
+    cwd = os.getcwd()
+    spec = registry.load_spec(cwd)
+    if spec is None:
+        ui.show_error("No Shellock environment found. Run 'shellock init' first.")
+        raise typer.Exit(1)
+
+    lines = []
+    if spec.module == "python":
+        py_ver = spec.runtime_version or "3.11"
+        lines.append(f"FROM python:{py_ver}-slim")
+        lines.append("WORKDIR /app")
+        lines.append("COPY . .")
+        if spec.packages:
+            pkgs = " ".join(p.to_install_string() for p in spec.packages)
+            lines.append(f"RUN pip install --no-cache-dir {pkgs}")
+        for key, val in spec.env_vars.items():
+            lines.append(f"ENV {key}={val}")
+        lines.append('CMD ["python", "app.py"]')
+    elif spec.module == "node":
+        lines.append("FROM node:lts-slim")
+        lines.append("WORKDIR /app")
+        lines.append("COPY package*.json ./")
+        lines.append("RUN npm ci")
+        lines.append("COPY . .")
+        for key, val in spec.env_vars.items():
+            lines.append(f"ENV {key}={val}")
+        lines.append('CMD ["node", "index.js"]')
+    else:
+        ui.show_error(f"Dockerfile generation not supported for module '{spec.module}'")
+        raise typer.Exit(1)
+
+    content = "\n".join(lines) + "\n"
+    Path(output).write_text(content)
+    ui.show_success(f"Generated {output}")
+    for line in lines:
+        ui.show_info(f"  {line}")
+
+
+@generate_app.command()
+def ci(
+    provider: str = typer.Option("github", "--provider", "-p", help="CI provider: github, gitlab"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
+) -> None:
+    """Generate a CI configuration file."""
+    from shellock_core.core import registry, ui
+
+    cwd = os.getcwd()
+    spec = registry.load_spec(cwd)
+    if spec is None:
+        ui.show_error("No Shellock environment found. Run 'shellock init' first.")
+        raise typer.Exit(1)
+
+    if provider == "github":
+        out_path = output or ".github/workflows/ci.yml"
+        content = _generate_github_ci(spec)
+    elif provider == "gitlab":
+        out_path = output or ".gitlab-ci.yml"
+        content = _generate_gitlab_ci(spec)
+    else:
+        ui.show_error(f"Unknown CI provider: {provider}. Use 'github' or 'gitlab'.")
+        raise typer.Exit(1)
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_text(content)
+    ui.show_success(f"Generated {out_path}")
+
+
+def _generate_github_ci(spec: "EnvSpec") -> str:
+    """Generate a GitHub Actions CI workflow."""
+    if spec.module == "python":
+        py_ver = spec.runtime_version or "3.11"
+        pkgs = " ".join(p.to_install_string() for p in spec.packages) if spec.packages else ""
+        return f"""name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '{py_ver}'
+      - run: pip install {pkgs}
+      - run: python -m pytest
+"""
+    elif spec.module == "node":
+        return """name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+      - run: npm ci
+      - run: npm test
+"""
+    return "# Unsupported module\n"
+
+
+def _generate_gitlab_ci(spec: "EnvSpec") -> str:
+    """Generate a GitLab CI config."""
+    if spec.module == "python":
+        py_ver = spec.runtime_version or "3.11"
+        pkgs = " ".join(p.to_install_string() for p in spec.packages) if spec.packages else ""
+        return f"""image: python:{py_ver}
+
+test:
+  script:
+    - pip install {pkgs}
+    - python -m pytest
+"""
+    elif spec.module == "node":
+        return """image: node:lts
+
+test:
+  script:
+    - npm ci
+    - npm test
+"""
+    return "# Unsupported module\n"
+
+
+# ── setup (alias for init) ──────────────────────────────────────
+
+
+@app.command()
+def setup(
+    description: str = typer.Argument(
+        ..., help="Describe the environment you want, e.g. 'npm Next.js + Tailwind'"
+    ),
+    module: Optional[str] = typer.Option(
+        None, "--module", "-m", help="Force a specific module (auto-detected if omitted)"
+    ),
+    template: Optional[str] = typer.Option(
+        None, "--template", "-t", help="Use a template instead of LLM (no AI needed)"
+    ),
+    name: Optional[str] = typer.Option(
+        None, "--name", "-n", help="Explicitly name the environment"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen without executing"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve without prompts"),
+) -> None:
+    """Create a new environment (alias for 'init')."""
+    init(description=description, module=module, template=template, name=name, dry_run=dry_run, yes=yes)
 
 
 # ── Main ────────────────────────────────────────────────────────

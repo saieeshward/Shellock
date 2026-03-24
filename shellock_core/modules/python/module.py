@@ -487,7 +487,7 @@ class PythonModule(ShellockModule):
             "fastapi", "flask", "django", "uvicorn", "gunicorn",
             "requests", "httpx", "aiohttp",
             "numpy", "pandas", "scipy", "matplotlib", "seaborn",
-            "scikit-learn", "sklearn", "tensorflow", "pytorch", "torch",
+            "scikit-learn", "tensorflow", "pytorch", "torch",
             "pydantic", "sqlalchemy", "alembic",
             "celery", "redis", "pytest", "black", "ruff", "mypy",
             "isort", "flake8", "pylint", "pre-commit",
@@ -499,15 +499,25 @@ class PythonModule(ShellockModule):
             "streamlit", "gradio", "dash",
         }
 
+        # Aliases: common user terms → actual package names
+        aliases = {
+            "sklearn": "scikit-learn",
+            "postgres": "psycopg2-binary",
+            "postgresql": "psycopg2-binary",
+            "mongo": "pymongo",
+            "mongodb": "pymongo",
+            "bs4": "beautifulsoup4",
+            "cv2": "opencv-python",
+        }
+
         words = re.findall(r'[\w-]+', description.lower())
         found = []
 
         for word in words:
             if word in known_packages:
                 found.append(word)
-            # Handle sklearn → scikit-learn
-            elif word == "sklearn":
-                found.append("scikit-learn")
+            elif word in aliases:
+                found.append(aliases[word])
 
         return found if found else []
 

@@ -220,7 +220,7 @@ def show_plan_preview(
 ) -> None:
     """Display the spec + commands without asking for approval (--yes mode)."""
     if _plain_mode():
-        _plain_approval(spec, commands, warnings)  # reuse display, ignore return
+        _plain_plan_display(spec, commands, warnings)
         return
 
     from rich.console import Console
@@ -608,6 +608,16 @@ def show_warning(message: str) -> None:
     Console().print(f"  [yellow]⚠[/] {message}")
 
 
+def show_adaptive(axis: str, message: str) -> None:
+    """Display an adaptive behaviour announcement — makes decisions scrutable."""
+    tag = {"preferences": "ADAPT:prefs", "error-patterns": "ADAPT:errors", "system": "ADAPT:sys"}.get(axis, f"ADAPT:{axis}")
+    if _plain_mode():
+        print(f"  [{tag}] {message}")
+        return
+    from rich.console import Console
+    Console().print(f"  [magenta][{tag}][/] {message}")
+
+
 def prompt_activate(env_name: str) -> bool:
     """Ask whether to activate the new environment. Returns True to activate."""
     if _plain_mode():
@@ -650,6 +660,32 @@ def _plain_edit_spec(spec: EnvSpec) -> EnvSpec:
         spec.env_path = str(_Path.home() / ".shellock" / "envs" / spec.env_id)
     print("  Spec updated.\n")
     return spec
+
+
+def _plain_plan_display(
+    spec: EnvSpec,
+    commands: list[Command],
+    warnings: list[dict[str, Any]] | None = None,
+) -> None:
+    """Plain-text plan display without prompting (used by --yes mode)."""
+    print(f"\n--- Environment Plan ({spec.module}) [auto-approved] ---")
+    print(f"  Name:     {spec.env_id}")
+    if spec.runtime_version:
+        print(f"  Runtime:  {spec.runtime_version}")
+    if spec.packages:
+        pkgs = [p.to_install_string() for p in spec.packages]
+        print(f"  Packages: {', '.join(pkgs)}")
+    if spec.env_path:
+        print(f"  Path:     {spec.env_path}")
+    if warnings:
+        for w in warnings:
+            print(f"  [{w.get('level', 'info')}] {w.get('message', '')}")
+    if commands:
+        print("\n  Commands:")
+        for cmd in commands:
+            label = cmd.impact.value.upper()
+            print(f"    [{label}] {cmd.command}")
+    print()
 
 
 def _plain_approval(

@@ -313,7 +313,7 @@ class NodeModule(ShellockModule):
 
     def _parse_packages_from_description(self, description: str) -> list[str]:
         known_packages = {
-            "react", "next", "nextjs", "vue", "angular", "svelte",
+            "react", "next", "vue", "angular", "svelte",
             "express", "fastify", "koa", "nestjs", "hapi",
             "typescript", "ts-node", "tsx",
             "eslint", "prettier", "jest", "vitest", "mocha",
@@ -326,12 +326,41 @@ class NodeModule(ShellockModule):
             "zod", "joi", "yup",
         }
 
+        # Aliases: common user terms → actual package names
+        aliases = {
+            "next.js": "next",
+            "nextjs": "next",
+            "tailwind": "tailwindcss",
+            "nest": "nestjs",
+            "socket": "socket.io",
+        }
+
         words = re.findall(r'[\w.-]+', description.lower())
         found = []
         for word in words:
             if word in known_packages:
                 found.append(word)
-            elif word == "nextjs":
-                found.append("next")
+            elif word in aliases:
+                found.append(aliases[word])
 
         return found if found else []
+
+
+# ── Module-level helpers ─────────────────────────────────────
+
+
+def _node_install_hint() -> str:
+    """Return a human-readable hint for installing Node.js on this platform."""
+    import platform as _platform
+    system = _platform.system().lower()
+    if system == "darwin":
+        if shutil.which("brew"):
+            return "brew install node"
+        return "Install via nvm: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash && nvm install --lts"
+    elif system == "linux":
+        if shutil.which("apt"):
+            return "sudo apt install nodejs npm"
+        if shutil.which("dnf") or shutil.which("yum"):
+            return "sudo dnf install nodejs npm"
+        return "Install via nvm: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash && nvm install --lts"
+    return "See https://nodejs.org/en/download/"
