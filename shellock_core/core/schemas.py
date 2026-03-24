@@ -137,6 +137,10 @@ class ActionEntry(BaseModel):
     spec: dict[str, Any] | None = None
     commands_run: list[str] = Field(default_factory=list)
     result: str = ""
+    failed_stderr: str | None = Field(
+        default=None,
+        description="Actual stderr output from a failed command, used by 'shellock fix'",
+    )
     trigger_error: str | None = None
     error_fingerprint: str | None = None
     fix_applied: dict[str, Any] | None = None

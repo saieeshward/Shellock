@@ -50,14 +50,15 @@ class NodeModule(ShellockModule):
         "nvm use",
         "node -e",
         "npx",
+        "brew install",       # for installing node/nvm on macOS
+        "curl -fsSL",         # for nvm installer
+        "curl -o-",           # for nvm installer (alternate form)
     ]
 
     blocked_patterns = [
         r"sudo\s+",
         r"rm\s+-rf\s+/",
         r"npm\s+publish",  # don't accidentally publish
-        r"\|\s*sh$",
-        r"\|\s*bash$",
     ]
 
     suggestable_tools = [
@@ -187,11 +188,36 @@ class NodeModule(ShellockModule):
         introspection = self.introspect(".")
 
         if not introspection.get("node_available"):
+            install_hint = _node_install_hint()
             warnings.append({
-                "level": "error",
-                "message": "Node.js is not installed on this system",
-                "suggestion": "Install via nvm, brew, or https://nodejs.org",
+                "level": "caution",
+                "message": f"Node.js is not installed. Will install it. ({install_hint})",
+                "suggestion": install_hint,
             })
+        else:
+            # Check if a specific Node version is requested
+            runtime = spec.get("runtime_version")
+            if runtime:
+                current = introspection.get("node_version", "")
+                # current is like "v20.11.0" — extract major
+                current_major = current.lstrip("v").split(".")[0] if current else ""
+                if current_major and current_major != runtime:
+                    if introspection.get("nvm_available"):
+                        warnings.append({
+                            "level": "caution",
+                            "message": (
+                                f"Node {current} installed, but v{runtime} requested. "
+                                f"Will install Node {runtime} via nvm."
+                            ),
+                        })
+                    else:
+                        warnings.append({
+                            "level": "caution",
+                            "message": (
+                                f"Node {current} installed, but v{runtime} requested. "
+                                f"Will install nvm, then Node {runtime}."
+                            ),
+                        })
 
         return warnings
 
@@ -287,7 +313,7 @@ class NodeModule(ShellockModule):
 
     def _parse_packages_from_description(self, description: str) -> list[str]:
         known_packages = {
-            "react", "next", "nextjs", "vue", "angular", "svelte",
+            "react", "next", "vue", "angular", "svelte",
             "express", "fastify", "koa", "nestjs", "hapi",
             "typescript", "ts-node", "tsx",
             "eslint", "prettier", "jest", "vitest", "mocha",
@@ -300,12 +326,41 @@ class NodeModule(ShellockModule):
             "zod", "joi", "yup",
         }
 
+        # Aliases: common user terms → actual package names
+        aliases = {
+            "next.js": "next",
+            "nextjs": "next",
+            "tailwind": "tailwindcss",
+            "nest": "nestjs",
+            "socket": "socket.io",
+        }
+
         words = re.findall(r'[\w.-]+', description.lower())
         found = []
         for word in words:
             if word in known_packages:
                 found.append(word)
-            elif word == "nextjs":
-                found.append("next")
+            elif word in aliases:
+                found.append(aliases[word])
 
         return found if found else []
+
+
+# ── Module-level helpers ─────────────────────────────────────
+
+
+def _node_install_hint() -> str:
+    """Return a human-readable hint for installing Node.js on this platform."""
+    import platform as _platform
+    system = _platform.system().lower()
+    if system == "darwin":
+        if shutil.which("brew"):
+            return "brew install node"
+        return "Install via nvm: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash && nvm install --lts"
+    elif system == "linux":
+        if shutil.which("apt"):
+            return "sudo apt install nodejs npm"
+        if shutil.which("dnf") or shutil.which("yum"):
+            return "sudo dnf install nodejs npm"
+        return "Install via nvm: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash && nvm install --lts"
+    return "See https://nodejs.org/en/download/"

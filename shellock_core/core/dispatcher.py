@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -148,10 +147,16 @@ def execute_commands(
     if env_override:
         env.update(env_override)
 
+    # Progress callback for UI
+    total = sum(1 for c in commands if c.impact != Impact.BLOCKED)
+    step = 0
+
     for cmd in commands:
         if cmd.impact == Impact.BLOCKED:
             logger.info("Skipping blocked command: %s", cmd.command)
             continue
+
+        step += 1
 
         if dry_run:
             result.results.append(CommandResult(
@@ -163,6 +168,8 @@ def execute_commands(
             ))
             continue
 
+        # Show progress
+        _show_progress(step, total, cmd.description or cmd.command)
         logger.info("Executing: %s", cmd.command)
         cmd_result = _run_command(cmd.command, work_dir, env)
         result.results.append(cmd_result)
@@ -170,11 +177,14 @@ def execute_commands(
         if not cmd_result.success:
             result.all_succeeded = False
             result.first_error = cmd_result
+            _show_step_result(False, cmd.description or cmd.command)
             logger.error(
                 "Command failed (exit %d): %s\nstderr: %s",
                 cmd_result.exit_code, cmd.command, cmd_result.stderr[:200],
             )
             break  # stop on first failure
+        else:
+            _show_step_result(True, cmd.description or cmd.command)
 
     return result
 
@@ -185,25 +195,54 @@ def _run_command(
     env: dict[str, str],
     timeout: int = 300,
 ) -> CommandResult:
-    """Run a single shell command and capture output."""
+    """Run a single shell command with live output streaming."""
+    import io
+    import select
+    import sys
+    import threading
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
             cwd=cwd,
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
         )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def _read_stream(stream: io.TextIOBase, buf: list[str]) -> None:
+            for line in iter(stream.readline, ""):
+                buf.append(line)
+                # Stream live to terminal (dimmed)
+                try:
+                    from rich.console import Console
+                    Console().print(f"    [dim]{line.rstrip()}[/]")
+                except ImportError:
+                    print(f"    {line.rstrip()}")
+
+        t_out = threading.Thread(target=_read_stream, args=(proc.stdout, stdout_lines))
+        t_err = threading.Thread(target=_read_stream, args=(proc.stderr, stderr_lines))
+        t_out.start()
+        t_err.start()
+
+        proc.wait(timeout=timeout)
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
         return CommandResult(
             command=command,
             exit_code=proc.returncode,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
+            stdout="".join(stdout_lines),
+            stderr="".join(stderr_lines),
             success=proc.returncode == 0,
         )
     except subprocess.TimeoutExpired:
+        proc.kill()
         return CommandResult(
             command=command,
             exit_code=-1,
@@ -219,3 +258,23 @@ def _run_command(
             stderr=str(e),
             success=False,
         )
+
+
+def _show_progress(step: int, total: int, description: str) -> None:
+    """Show execution progress."""
+    try:
+        from rich.console import Console
+        Console().print(f"  [dim][{step}/{total}][/] {description}...", end="")
+    except ImportError:
+        print(f"  [{step}/{total}] {description}...", end="")
+
+
+def _show_step_result(success: bool, description: str) -> None:
+    """Show step completion."""
+    try:
+        from rich.console import Console
+        icon = "[green]done[/]" if success else "[red]failed[/]"
+        Console().print(f" {icon}")
+    except ImportError:
+        label = "done" if success else "failed"
+        print(f" {label}")

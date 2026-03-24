@@ -93,9 +93,13 @@ JSON:"""
 class LLMClient:
     """Unified interface for LLM providers.
 
-    Handles Ollama (local), litellm (cloud), and template fallback.
+    Handles Ollama (local), litellm (cloud via Gemini), and template fallback.
+    Implements the tier chain: Ollama → Gemini 2.0 Flash → Template.
     All methods return validated Pydantic models or raw dicts.
     """
+
+    # Default cloud model for Gemini free tier via litellm
+    CLOUD_MODEL = "gemini/gemini-2.0-flash"
 
     def __init__(self, config: ShelllockConfig, tier: LLMTier) -> None:
         self.config = config
@@ -108,10 +112,14 @@ class LLMClient:
         if self.tier == LLMTier.TEMPLATE:
             return False
         if self.tier == LLMTier.LOCAL:
-            return self._check_ollama()
+            return self._check_ollama() or self._cloud_available()
         if self.tier == LLMTier.CLOUD:
-            return self.config.llm_api_key is not None
+            return self._cloud_available()
         return False
+
+    def _cloud_available(self) -> bool:
+        """Check if cloud LLM (Gemini) is configured."""
+        return self.config.llm_api_key is not None
 
     def generate_spec(
         self,
@@ -181,9 +189,16 @@ class LLMClient:
         return None
 
     def _call_llm(self, prompt: str) -> str | None:
-        """Dispatch to the appropriate LLM backend."""
+        """Dispatch to LLM with fallback chain: Ollama → Gemini → None."""
         if self.tier == LLMTier.LOCAL:
-            return self._call_ollama(prompt)
+            result = self._call_ollama(prompt)
+            if result is not None:
+                return result
+            # Ollama failed — fall through to cloud
+            if self._cloud_available():
+                logger.info("Ollama unavailable, falling back to Gemini cloud")
+                return self._call_litellm(prompt)
+            return None
         if self.tier == LLMTier.CLOUD:
             return self._call_litellm(prompt)
         return None
@@ -207,12 +222,18 @@ class LLMClient:
             return None
 
     def _call_litellm(self, prompt: str) -> str | None:
-        """Call a cloud LLM via litellm."""
+        """Call a cloud LLM via litellm (defaults to Gemini 2.0 Flash)."""
         try:
             import litellm
 
+            # Use Gemini model for cloud tier, unless user overrode in config
+            model = self.CLOUD_MODEL
+            if self.tier == LLMTier.CLOUD and self.config.llm_model and "gemini" not in self.config.llm_model:
+                # User set a custom cloud model — respect it
+                model = self.config.llm_model
+
             response = litellm.completion(
-                model=self.config.llm_model,
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 api_key=self.config.llm_api_key,
                 temperature=0.1,

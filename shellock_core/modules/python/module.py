@@ -52,6 +52,8 @@ class PythonModule(ShellockModule):
         "pyenv install",
         "pyenv local",
         "pyenv global",
+        "brew install",       # for installing pyenv/tools on macOS
+        "curl -fsSL",         # for installer scripts (pyenv on Linux)
         "source",             # for venv activation hints
     ]
 
@@ -61,8 +63,6 @@ class PythonModule(ShellockModule):
         r"rm\s+-r\s+/",
         r"chmod\s+777",
         r">\s*/etc/",
-        r"\|\s*sh$",
-        r"\|\s*bash$",
         r"pip\s+install\s+--break-system-packages",
     ]
 
@@ -188,16 +188,43 @@ class PythonModule(ShellockModule):
                     "suggestion": "Will install into isolated venv",
                 })
 
-        # Check if the requested Python version is available
+        # Check if the requested Python version binary exists on PATH
         runtime = spec.get("runtime_version")
-        if runtime and introspection.get("pyenv_available"):
-            available = introspection.get("available_pythons", [])
-            if available and not any(runtime in v for v in available):
-                warnings.append({
-                    "level": "caution",
-                    "message": f"Python {runtime} not found in pyenv. May need to install it.",
-                    "suggestion": f"pyenv install {runtime}",
-                })
+        if runtime:
+            import os as _os
+            python_cmd = "python" if _os.name == "nt" else f"python{runtime}"
+            if not shutil.which(python_cmd):
+                # Also try just major.minor (e.g., python3.11)
+                major_minor = ".".join(runtime.split(".")[:2])
+                alt_cmd = f"python{major_minor}"
+                if python_cmd != alt_cmd and shutil.which(alt_cmd):
+                    pass  # alternative found, no warning needed
+                elif shutil.which("pyenv"):
+                    # pyenv is available — we can install the missing version
+                    warnings.append({
+                        "level": "caution",
+                        "message": (
+                            f"'{python_cmd}' not found. "
+                            f"Will install Python {runtime} via pyenv."
+                        ),
+                        "suggestion": f"pyenv install {runtime}",
+                    })
+                else:
+                    # No pyenv, no binary — offer to install pyenv + Python
+                    available_pythons = []
+                    for candidate in ["python3", "python3.9", "python3.10", "python3.11", "python3.12", "python3.13"]:
+                        if shutil.which(candidate):
+                            available_pythons.append(candidate)
+
+                    install_hint = _pyenv_install_hint()
+                    warnings.append({
+                        "level": "caution",
+                        "message": (
+                            f"'{python_cmd}' not found. "
+                            f"Will install pyenv, then Python {runtime}."
+                        ),
+                        "suggestion": install_hint,
+                    })
 
         return warnings
 
@@ -217,13 +244,65 @@ class PythonModule(ShellockModule):
         # Cross-platform python command and paths
         python_cmd = "python" if is_windows else (f"python{runtime}" if runtime else "python3")
         pip_path = str(venv / ("Scripts" if is_windows else "bin") / "pip")
-        rollback_rm = f"rmdir /s /q {env_path}" if is_windows else f"rm -rf {env_path}"
+        # Quote paths that may contain spaces
+        q_env_path = f'"{env_path}"' if " " in env_path else env_path
+        q_pip_path = f'"{pip_path}"' if " " in pip_path else pip_path
+        rollback_rm = f'rmdir /s /q {q_env_path}' if is_windows else f'rm -rf {q_env_path}'
 
         commands = []
 
+        # Check if the requested Python is available; if not, install via pyenv
+        needs_pyenv_install = False
+        needs_pyenv_itself = False
+        use_pyenv_exec = False
+        if not is_windows and runtime and runtime != "3":
+            if not shutil.which(python_cmd):
+                # Try major.minor alternative
+                major_minor = ".".join(runtime.split(".")[:2])
+                alt_cmd = f"python{major_minor}"
+                if python_cmd != alt_cmd and shutil.which(alt_cmd):
+                    python_cmd = alt_cmd
+                elif shutil.which("pyenv"):
+                    needs_pyenv_install = True
+                    use_pyenv_exec = True
+                    # Use pyenv exec so pyenv resolves 3.7 -> 3.7.17 automatically
+                    python_cmd = f"PYENV_VERSION={runtime} pyenv exec python"
+                else:
+                    # pyenv not installed either — install it first
+                    needs_pyenv_itself = True
+                    needs_pyenv_install = True
+                    use_pyenv_exec = True
+                    python_cmd = f"PYENV_VERSION={runtime} pyenv exec python"
+
+        if needs_pyenv_itself:
+            install_cmd = _pyenv_install_command()
+            if install_cmd:
+                commands.append({
+                    "command": install_cmd,
+                    "impact": "caution",
+                    "description": "Install pyenv (Python version manager)",
+                })
+                # After install, try to find pyenv on PATH first (Homebrew puts it
+                # in /opt/homebrew/bin/). Fall back to ~/.pyenv/bin/pyenv only for
+                # git-clone installations where the binary genuinely isn't on PATH.
+                pyenv_bin = shutil.which("pyenv") or f"{os.environ.get('PYENV_ROOT', str(_Path.home() / '.pyenv'))}/bin/pyenv"
+                commands.append({
+                    "command": f"{pyenv_bin} install {runtime} --skip-existing",
+                    "impact": "caution",
+                    "description": f"Install Python {runtime} via pyenv",
+                })
+                needs_pyenv_install = False  # already handled above
+
+        if needs_pyenv_install:
+            commands.append({
+                "command": f"pyenv install {runtime} --skip-existing",
+                "impact": "caution",
+                "description": f"Install Python {runtime} via pyenv",
+            })
+
         # Create virtual environment
         commands.append({
-            "command": f"{python_cmd} -m venv {env_path}",
+            "command": f"{python_cmd} -m venv {q_env_path}",
             "impact": "safe",
             "description": f"Create virtual environment at {env_path}",
             "rollback_command": rollback_rm,
@@ -247,10 +326,10 @@ class PythonModule(ShellockModule):
                     pkg_names.append(str(p))
 
             commands.append({
-                "command": f"{pip_path} install {' '.join(pkg_names)}",
+                "command": f"{q_pip_path} install {' '.join(pkg_names)}",
                 "impact": "safe",
                 "description": f"Install: {', '.join(pkg_names)}",
-                "rollback_command": f"{pip_path} uninstall -y {' '.join(pkg_names)}",
+                "rollback_command": f"{q_pip_path} uninstall -y {' '.join(pkg_names)}",
             })
 
         # Post hooks
@@ -293,6 +372,27 @@ class PythonModule(ShellockModule):
                 "action": "configure",
                 "commands": [f"{python_cmd} -m venv .venv", activate],
                 "reasoning": "System Python is externally managed (PEP 668). Use a virtual environment instead.",
+            }
+
+        # Python version not found (command not found)
+        cmd_not_found = re.search(r"(python\d[.\d]*):.*(?:command not found|No such file)", stderr)
+        if cmd_not_found:
+            missing_cmd = cmd_not_found.group(1)
+            # Find what IS available
+            available = []
+            for candidate in ["python3", "python3.9", "python3.10", "python3.11", "python3.12", "python3.13"]:
+                if shutil.which(candidate):
+                    available.append(candidate)
+            default_python = available[0] if available else "python3"
+            return {
+                "action": "configure",
+                "commands": [],
+                "reasoning": (
+                    f"'{missing_cmd}' is not installed on your system. "
+                    f"Available Python versions: {', '.join(available) if available else 'none detected'}. "
+                    f"Re-run: shellock init \"your description\" (Shellock will use {default_python}), "
+                    f"or install the missing version via pyenv: pyenv install {missing_cmd.replace('python', '')}"
+                ),
             }
 
         return None
@@ -387,7 +487,7 @@ class PythonModule(ShellockModule):
             "fastapi", "flask", "django", "uvicorn", "gunicorn",
             "requests", "httpx", "aiohttp",
             "numpy", "pandas", "scipy", "matplotlib", "seaborn",
-            "scikit-learn", "sklearn", "tensorflow", "pytorch", "torch",
+            "scikit-learn", "tensorflow", "pytorch", "torch",
             "pydantic", "sqlalchemy", "alembic",
             "celery", "redis", "pytest", "black", "ruff", "mypy",
             "isort", "flake8", "pylint", "pre-commit",
@@ -399,14 +499,55 @@ class PythonModule(ShellockModule):
             "streamlit", "gradio", "dash",
         }
 
+        # Aliases: common user terms → actual package names
+        aliases = {
+            "sklearn": "scikit-learn",
+            "postgres": "psycopg2-binary",
+            "postgresql": "psycopg2-binary",
+            "mongo": "pymongo",
+            "mongodb": "pymongo",
+            "bs4": "beautifulsoup4",
+            "cv2": "opencv-python",
+        }
+
         words = re.findall(r'[\w-]+', description.lower())
         found = []
 
         for word in words:
             if word in known_packages:
                 found.append(word)
-            # Handle sklearn → scikit-learn
-            elif word == "sklearn":
-                found.append("scikit-learn")
+            elif word in aliases:
+                found.append(aliases[word])
 
         return found if found else []
+
+
+# ── Module-level helpers (used by PythonModule methods) ────────
+
+
+def _pyenv_install_hint() -> str:
+    """Return a human-readable hint for installing pyenv on this platform."""
+    import platform as _platform
+    system = _platform.system().lower()
+    if system == "darwin":
+        if shutil.which("brew"):
+            return "brew install pyenv"
+        return "curl https://pyenv.run | bash"
+    elif system == "linux":
+        if shutil.which("apt"):
+            return "curl https://pyenv.run | bash  (after: apt install build-essential libssl-dev zlib1g-dev ...)"
+        if shutil.which("dnf") or shutil.which("yum"):
+            return "curl https://pyenv.run | bash  (after: dnf install gcc make zlib-devel ...)"
+        return "curl https://pyenv.run | bash"
+    return "See https://github.com/pyenv/pyenv#installation"
+
+
+def _pyenv_install_command() -> str | None:
+    """Return the shell command to install pyenv on this platform, or None."""
+    import platform as _platform
+    system = _platform.system().lower()
+    if system == "darwin" and shutil.which("brew"):
+        return "brew install pyenv"
+    elif system in ("darwin", "linux"):
+        return 'curl -fsSL https://pyenv.run | bash'
+    return None
