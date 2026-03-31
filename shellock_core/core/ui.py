@@ -115,13 +115,30 @@ def show_approval(
             console.print(f"  [dim]Choose yes, no, edit, or explain.[/]")
 
 
+def _parse_package_string(pkg_str: str):
+    """Parse a package string like 'requests>=2.28' into a PackageSpec."""
+    import re
+    from shellock_core.core.schemas import PackageSpec
+
+    pkg_str = pkg_str.strip()
+    if not pkg_str:
+        return None
+    # Split name from version specifier (==, >=, <=, !=, ~=, >, <)
+    match = re.match(r'^([A-Za-z0-9_\-\.]+)(\[.*?\])?((?:[><=!~]+.*)?)$', pkg_str)
+    if match:
+        name = match.group(1)
+        extras_str = match.group(2) or ""
+        version = match.group(3).strip() or None
+        extras = [e.strip() for e in extras_str.strip("[]").split(",") if e.strip()] if extras_str else []
+        return PackageSpec(name=name, version=version, extras=extras)
+    return PackageSpec(name=pkg_str)
+
+
 def prompt_edit_spec(spec: EnvSpec) -> EnvSpec:
     """Let the user interactively edit key fields of the spec.
 
     Returns the modified spec.
     """
-    from shellock_core.core.schemas import PackageSpec
-
     if _plain_mode():
         return _plain_edit_spec(spec)
 
@@ -147,9 +164,8 @@ def prompt_edit_spec(spec: EnvSpec) -> EnvSpec:
     console.print(f"  [dim]Current packages: {current_pkgs}[/]")
     new_pkgs = console.input("  packages (comma-separated, or Enter to keep): ").strip()
     if new_pkgs:
-        spec.packages = [
-            PackageSpec(name=p.strip()) for p in new_pkgs.split(",") if p.strip()
-        ]
+        parsed = [_parse_package_string(p) for p in new_pkgs.split(",")]
+        spec.packages = [p for p in parsed if p is not None]
 
     # Update env_path if env_id changed
     from pathlib import Path as _Path
@@ -639,8 +655,6 @@ def prompt_activate(env_name: str) -> bool:
 
 def _plain_edit_spec(spec: EnvSpec) -> EnvSpec:
     """Plain-mode spec editing."""
-    from shellock_core.core.schemas import PackageSpec
-
     print("\nEdit spec — press Enter to keep current value:")
     new_id = input(f"  env_id [{spec.env_id}]: ").strip()
     if new_id:
@@ -652,9 +666,8 @@ def _plain_edit_spec(spec: EnvSpec) -> EnvSpec:
     print(f"  Current packages: {current_pkgs}")
     new_pkgs = input("  packages (comma-separated, or Enter to keep): ").strip()
     if new_pkgs:
-        spec.packages = [
-            PackageSpec(name=p.strip()) for p in new_pkgs.split(",") if p.strip()
-        ]
+        parsed = [_parse_package_string(p) for p in new_pkgs.split(",")]
+        spec.packages = [p for p in parsed if p is not None]
     if new_id:
         from pathlib import Path as _Path
         spec.env_path = str(_Path.home() / ".shellock" / "envs" / spec.env_id)
