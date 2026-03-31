@@ -571,8 +571,15 @@ def fix(
                 ui.show_success("Fix applied successfully")
             else:
                 ui.show_error("Fix failed. Check the output above.")
+                raise typer.Exit(1)
+        else:
+            ui.show_error("Fix was diagnosed but contained no commands to run.")
+            raise typer.Exit(1)
     elif not diagnosis.diagnosed:
-        ui.show_info("No fix available.")
+        # show_diagnosis already displayed the "couldn't diagnose" panel
+        raise typer.Exit(1)
+    else:
+        ui.show_info("Fix not applied.")
 
 
 # ── list ────────────────────────────────────────────────────────
