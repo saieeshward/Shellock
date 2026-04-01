@@ -51,6 +51,9 @@ shellock modules
 shellock config
 shellock config llm_provider ollama
 
+# Inspect the Shellock profile
+shellock profile  # shows system/hardware info plus the active spec
+
 # Dry run (shows what would happen, no execution)
 shellock init "node react app with typescript" --dry-run
 

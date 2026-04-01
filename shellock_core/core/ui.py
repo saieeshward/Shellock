@@ -15,15 +15,114 @@ Key screens:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
-from shellock_core.core.schemas import Command, DiagnosisResult, EnvSpec, Impact
+from shellock_core.core.schemas import Command, DiagnosisResult, EnvSpec, Impact, ProjectHistory, UserProfile
 
 
 def _plain_mode() -> bool:
     """Check if Rich formatting is disabled."""
     return os.environ.get("SHELLOCK_PLAIN", "").strip() in ("1", "true", "yes")
 
+
+def _shorten(text: str, width: int = 70) -> str:
+    width = max(width, 4)
+    if len(text) <= width:
+        return text
+    return text[: width - 3].rstrip() + "..."
+
+
+def _format_tool_counts(counts: dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{tool} ({count})" for tool, count in items)
+
+def _collect_error_entries(history: ProjectHistory) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for fingerprint, data in history.error_frequency.items():
+        entries.append({
+            "fingerprint": fingerprint,
+            "pattern": data.get("pattern", ""),
+            "count": data.get("count", 0),
+            "fixes_attempted": data.get("fixes_attempted") or [],
+            "fixes_that_worked": data.get("fixes_that_worked") or [],
+        })
+    entries.sort(key=lambda item: item["count"], reverse=True)
+    return entries
+
+def _plain_profile(
+    profile: UserProfile,
+    history: ProjectHistory,
+    profile_path: Path,
+    spec: EnvSpec | None = None,
+) -> None:
+    print()
+    print("--- Shellock profile ---")
+    sys_info = profile.system
+    os_line = f"{sys_info.os or 'unknown OS'} / {sys_info.arch or 'unknown arch'} / {sys_info.shell or 'unknown shell'}"
+    print(f"System: {os_line}")
+    pkg_managers = ", ".join(sys_info.package_managers) if sys_info.package_managers else "none detected"
+    print(f"Package managers: {pkg_managers}")
+    llm_provider = sys_info.llm_provider or "not configured"
+    if sys_info.llm_model:
+        llm_provider = f"{llm_provider} ({sys_info.llm_model})"
+    print(f"LLM provider: {llm_provider}")
+    print(f"Suggestion threshold: {profile.suggestion_threshold} uses")
+    if profile.preferences:
+        print("Preferences tracked:")
+        for category in sorted(profile.preferences):
+            print(f"  {category}: {_format_tool_counts(profile.preferences[category])}")
+    else:
+        print("Preferences tracked: none yet")
+    if profile.rejected_suggestions:
+        print(f"Rejected suggestions: {', '.join(profile.rejected_suggestions)}")
+    else:
+        print("Rejected suggestions: none")
+    print(f"Profile file: {profile_path}")
+    cpu_description = sys_info.cpu_info or "unknown CPU"
+    logical = sys_info.cpu_logical_cores or "unknown"
+    physical = sys_info.cpu_physical_cores or "unknown"
+    print(f"CPU: {cpu_description} ({logical} logical / {physical} physical)")
+    accel_tags = []
+    if sys_info.gpu_info:
+        accel_tags.append(sys_info.gpu_info)
+    if sys_info.cuda_available:
+        accel_tags.append("CUDA available")
+    if sys_info.mps_available:
+        accel_tags.append("MPS available")
+    if accel_tags:
+        print(f"Accelerators: {', '.join(accel_tags)}")
+    else:
+        print("Accelerators: CPU-only")
+    entries = _collect_error_entries(history)
+    if entries:
+        print(f"Errors seen in this project ({len(entries)} tracked):")
+        for entry in entries[:5]:
+            print(f"  {entry['fingerprint']} - seen {entry['count']} times")
+            print(f"     pattern: {_shorten(entry['pattern'], 80)}")
+            attempts = len(entry['fixes_attempted'])
+            successes = len(entry['fixes_that_worked'])
+            if attempts or successes:
+                print(f"     fixes attempted: {attempts}, succeeded: {successes}")
+        if len(entries) > 5:
+            print(f"  ...and {len(entries) - 5} more fingerprints")
+    else:
+        print("Errors seen in this project: none yet")
+    print()
+    if spec:
+        print(f"Active spec: {spec.env_id} ({spec.module})")
+        if spec.runtime_version:
+            print(f"  Runtime: {spec.runtime_version}")
+        if spec.packages:
+            pkg_names = ", ".join(p.to_install_string() for p in spec.packages[:8])
+            more = len(spec.packages) - 8
+            if more > 0:
+                pkg_names += f" +{more} more"
+            print(f"  Packages: {pkg_names}")
+        if spec.env_path:
+            print(f"  Path: {spec.env_path}")
 
 def show_approval(
     spec: EnvSpec,
@@ -413,6 +512,88 @@ def show_history(actions: list[dict[str, Any]]) -> None:
         if summary:
             console.print(f"             {summary}")
         console.print()
+
+
+def show_profile(
+    profile: UserProfile,
+    history: ProjectHistory,
+    spec: EnvSpec | None = None,
+) -> None:
+    """Display the learned profile and project error context."""
+    profile_path = Path.home() / ".shellock" / "profile.json"
+    if _plain_mode():
+        _plain_profile(profile, history, profile_path, spec)
+        return
+
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+    console.print()
+
+    sys_info = profile.system
+    system_line = f"{sys_info.os or 'OS unknown'} - {sys_info.arch or 'arch unknown'}"
+    shell_line = sys_info.shell or "shell unknown"
+    pkg_managers = ", ".join(sys_info.package_managers) or "none detected"
+    llm_provider = sys_info.llm_provider or "not configured"
+    if sys_info.llm_model:
+        llm_provider = f"{llm_provider} ({sys_info.llm_model})"
+
+    panel_lines = [
+        f"[dim]System:[/] {system_line}",
+        f"[dim]Shell:[/] {shell_line}",
+        f"[dim]Package managers:[/] {pkg_managers}",
+        f"[dim]LLM provider:[/] {llm_provider}",
+        f"[dim]LLM tier:[/] {sys_info.llm_tier.value}",
+        f"[dim]Suggestion threshold:[/] {profile.suggestion_threshold} uses",
+        f"[dim]Profile file:[/] {profile_path}",
+    ]
+    console.print(Panel("\n".join(panel_lines), title="Shellock profile", border_style="cyan"))
+
+    cpu_line = sys_info.cpu_info or "unknown CPU"
+    hardware_lines = [f"[dim]CPU:[/] {cpu_line}"]
+    if sys_info.cpu_logical_cores is not None:
+        hardware_lines.append(f"[dim]Logical cores:[/] {sys_info.cpu_logical_cores}")
+    if sys_info.cpu_physical_cores is not None:
+        hardware_lines.append(f"[dim]Physical cores:[/] {sys_info.cpu_physical_cores}")
+    accel_tags = []
+    if sys_info.gpu_info:
+        accel_tags.append(sys_info.gpu_info)
+    if sys_info.cuda_available:
+        accel_tags.append("CUDA available")
+    if sys_info.mps_available:
+        accel_tags.append("MPS available")
+    if accel_tags:
+        hardware_lines.append(f"[dim]Accelerators:[/] {', '.join(accel_tags)}")
+    else:
+        hardware_lines.append("[dim]Accelerators:[/] CPU-only")
+    console.print(Panel("\n".join(hardware_lines), title="Hardware overview", border_style="green"))
+
+    if spec:
+        pkg_display = ""
+        if spec.packages:
+            pkg_display = ", ".join(p.to_install_string() for p in spec.packages[:8])
+            if len(spec.packages) > 8:
+                pkg_display += f" [dim]+{len(spec.packages) - 8} more[/]"
+        spec_table = Table(
+            title="Active spec",
+            border_style="blue",
+            show_header=False,
+            box=None,
+            padding=(0, 1),
+        )
+        spec_table.add_column("Field", style="dim", width=12)
+        spec_table.add_column("Value")
+        spec_table.add_row("Env ID", spec.env_id)
+        spec_table.add_row("Module", spec.module)
+        if spec.runtime_version:
+            spec_table.add_row("Runtime", spec.runtime_version)
+        if pkg_display:
+            spec_table.add_row("Packages", pkg_display)
+        if spec.env_path:
+            spec_table.add_row("Path", spec.env_path)
+        console.print(spec_table)
 
 
 def show_envs(envs_dir: Any) -> None:

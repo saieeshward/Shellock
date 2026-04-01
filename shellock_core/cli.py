@@ -603,6 +603,19 @@ def list_history() -> None:
     ui.show_info("Environments are typically located in ~/.shellock/envs/")
 
 
+@app.command()
+def profile() -> None:
+    """Show what preferences and errors Shellock has recorded."""
+    from shellock_core.core import registry, ui
+
+    cwd = os.getcwd()
+    profile = registry.load_profile()
+    history = registry.load_history(cwd)
+    spec = registry.load_spec(cwd)
+
+    ui.show_profile(profile, history, spec)
+
+
 # ── rollback ────────────────────────────────────────────────────
 
 

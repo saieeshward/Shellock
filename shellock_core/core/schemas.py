@@ -181,6 +181,12 @@ class SystemInfo(BaseModel):
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_tier: LLMTier = LLMTier.TEMPLATE
+    cpu_info: str = Field(default="", description="CPU model or identifier")
+    cpu_logical_cores: int | None = Field(default=None, description="Logical CPU cores")
+    cpu_physical_cores: int | None = Field(default=None, description="Physical CPU cores, if known")
+    gpu_info: str | None = Field(default=None, description="Detected GPU or accelerator")
+    cuda_available: bool = Field(default=False, description="Is CUDA available via torch?")
+    mps_available: bool = Field(default=False, description="Is Apple MPS available?")
 
 
 class UserProfile(BaseModel):

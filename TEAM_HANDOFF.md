@@ -554,6 +554,7 @@ All models have `extra='forbid'` — any unexpected field from LLM output is cau
 | `shellock rollback [id]` | Undo a previous action | |
 | `shellock modules` | List available modules | |
 | `shellock config [key] [val]` | View/set configuration | |
+| `shellock profile` | Show tracked preferences, recent errors, and detected hardware/spec info | |
 | `shellock version` | Show version | |
 
 ### Environment Lifecycle
