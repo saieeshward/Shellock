@@ -109,7 +109,7 @@ def _plain_profile(
         if len(entries) > 5:
             print(f"  ...and {len(entries) - 5} more fingerprints")
     else:
-    print("Errors seen in this project: none yet")
+        print("Errors seen in this project: none yet")
     print()
     if spec:
         print(f"Active spec: {spec.env_id} ({spec.module})")
