@@ -21,6 +21,9 @@ from shellock_core.core.schemas import LLMTier, SystemInfo
 
 def detect_system() -> SystemInfo:
     """Detect the current system's capabilities."""
+    cpu_info = _detect_cpu_model()
+    logical_cores, physical_cores = _detect_cpu_counts()
+    gpu_info, cuda_available, mps_available = _detect_accelerators()
     return SystemInfo(
         os=_detect_os(),
         arch=platform.machine(),
@@ -29,6 +32,12 @@ def detect_system() -> SystemInfo:
         llm_provider=_detect_llm_provider(),
         llm_model=_detect_llm_model(),
         llm_tier=_detect_llm_tier(),
+        cpu_info=cpu_info,
+        cpu_logical_cores=logical_cores,
+        cpu_physical_cores=physical_cores,
+        gpu_info=gpu_info,
+        cuda_available=cuda_available,
+        mps_available=mps_available,
     )
 
 
@@ -189,3 +198,124 @@ def _has_internet(host: str = "1.1.1.1", port: int = 443, timeout: float = 2.0) 
             return True
     except (ConnectionRefusedError, TimeoutError, OSError):
         return False
+
+
+def _detect_cpu_model() -> str:
+    """Try to report the CPU brand string."""
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    elif sys.platform.startswith("linux"):
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if line.lower().startswith("model name"):
+                        return line.split(":", 1)[1].strip()
+        except FileNotFoundError:
+            pass
+    elif os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["wmic", "cpu", "get", "name"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if len(lines) >= 2:
+                return lines[1]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    return platform.processor() or "unknown"
+
+
+def _detect_cpu_counts() -> tuple[int | None, int | None]:
+    """Return logical and physical core counts when available."""
+    logical = os.cpu_count()
+    physical = None
+    try:
+        import psutil
+
+        physical = psutil.cpu_count(logical=False)
+    except ImportError:
+        if sys.platform.startswith("linux"):
+            physical = _count_physical_cores_linux()
+    except Exception:
+        physical = None
+    return logical or None, physical
+
+
+def _count_physical_cores_linux() -> int | None:
+    """Parse /proc/cpuinfo for physical CPU IDs."""
+    try:
+        physical_ids = set()
+        with open("/proc/cpuinfo", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                if key.strip().lower() == "physical id":
+                    physical_ids.add(value.strip())
+        if physical_ids:
+            return len(physical_ids)
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def _detect_accelerators() -> tuple[str | None, bool, bool]:
+    """Detect GPU hardware and accelerator availability."""
+    gpu_info: str | None = None
+    cuda_available = False
+    mps_available = False
+
+    try:
+        import torch
+
+        cuda_available = getattr(torch.cuda, "is_available", lambda: False)()
+        mps_available = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+        if cuda_available:
+            names: list[str] = []
+            for idx in range(getattr(torch.cuda, "device_count", lambda: 0)()):
+                try:
+                    names.append(torch.cuda.get_device_name(idx))
+                except Exception:
+                    pass
+            if names:
+                # preserve order without duplicates
+                seen = []
+                for name in names:
+                    if name not in seen:
+                        seen.append(name)
+                gpu_info = ", ".join(seen)
+        elif mps_available:
+            gpu_info = "Apple MPS"
+    except Exception:
+        pass
+
+    if not gpu_info:
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if result.returncode == 0:
+                names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                if names:
+                    gpu_info = ", ".join(dict.fromkeys(names))
+                    cuda_available = True
+        except Exception:
+            pass
+
+    return gpu_info, cuda_available, mps_available

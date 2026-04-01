@@ -52,7 +52,12 @@ def _collect_error_entries(history: ProjectHistory) -> list[dict[str, Any]]:
     entries.sort(key=lambda item: item["count"], reverse=True)
     return entries
 
-def _plain_profile(profile: UserProfile, history: ProjectHistory, profile_path: Path) -> None:
+def _plain_profile(
+    profile: UserProfile,
+    history: ProjectHistory,
+    profile_path: Path,
+    spec: EnvSpec | None = None,
+) -> None:
     print()
     print("--- Shellock profile ---")
     sys_info = profile.system
@@ -76,6 +81,21 @@ def _plain_profile(profile: UserProfile, history: ProjectHistory, profile_path: 
     else:
         print("Rejected suggestions: none")
     print(f"Profile file: {profile_path}")
+    cpu_description = sys_info.cpu_info or "unknown CPU"
+    logical = sys_info.cpu_logical_cores or "unknown"
+    physical = sys_info.cpu_physical_cores or "unknown"
+    print(f"CPU: {cpu_description} ({logical} logical / {physical} physical)")
+    accel_tags = []
+    if sys_info.gpu_info:
+        accel_tags.append(sys_info.gpu_info)
+    if sys_info.cuda_available:
+        accel_tags.append("CUDA available")
+    if sys_info.mps_available:
+        accel_tags.append("MPS available")
+    if accel_tags:
+        print(f"Accelerators: {', '.join(accel_tags)}")
+    else:
+        print("Accelerators: CPU-only")
     entries = _collect_error_entries(history)
     if entries:
         print(f"Errors seen in this project ({len(entries)} tracked):")
@@ -89,8 +109,20 @@ def _plain_profile(profile: UserProfile, history: ProjectHistory, profile_path: 
         if len(entries) > 5:
             print(f"  ...and {len(entries) - 5} more fingerprints")
     else:
-        print("Errors seen in this project: none yet")
+    print("Errors seen in this project: none yet")
     print()
+    if spec:
+        print(f"Active spec: {spec.env_id} ({spec.module})")
+        if spec.runtime_version:
+            print(f"  Runtime: {spec.runtime_version}")
+        if spec.packages:
+            pkg_names = ", ".join(p.to_install_string() for p in spec.packages[:8])
+            more = len(spec.packages) - 8
+            if more > 0:
+                pkg_names += f" +{more} more"
+            print(f"  Packages: {pkg_names}")
+        if spec.env_path:
+            print(f"  Path: {spec.env_path}")
 
 def show_approval(
     spec: EnvSpec,
@@ -466,11 +498,15 @@ def show_history(actions: list[dict[str, Any]]) -> None:
         console.print()
 
 
-def show_profile(profile: UserProfile, history: ProjectHistory) -> None:
+def show_profile(
+    profile: UserProfile,
+    history: ProjectHistory,
+    spec: EnvSpec | None = None,
+) -> None:
     """Display the learned profile and project error context."""
     profile_path = Path.home() / ".shellock" / "profile.json"
     if _plain_mode():
-        _plain_profile(profile, history, profile_path)
+        _plain_profile(profile, history, profile_path, spec)
         return
 
     from rich.console import Console
@@ -498,6 +534,50 @@ def show_profile(profile: UserProfile, history: ProjectHistory) -> None:
         f"[dim]Profile file:[/] {profile_path}",
     ]
     console.print(Panel("\n".join(panel_lines), title="Shellock profile", border_style="cyan"))
+
+    cpu_line = sys_info.cpu_info or "unknown CPU"
+    hardware_lines = [f"[dim]CPU:[/] {cpu_line}"]
+    if sys_info.cpu_logical_cores is not None:
+        hardware_lines.append(f"[dim]Logical cores:[/] {sys_info.cpu_logical_cores}")
+    if sys_info.cpu_physical_cores is not None:
+        hardware_lines.append(f"[dim]Physical cores:[/] {sys_info.cpu_physical_cores}")
+    accel_tags = []
+    if sys_info.gpu_info:
+        accel_tags.append(sys_info.gpu_info)
+    if sys_info.cuda_available:
+        accel_tags.append("CUDA available")
+    if sys_info.mps_available:
+        accel_tags.append("MPS available")
+    if accel_tags:
+        hardware_lines.append(f"[dim]Accelerators:[/] {', '.join(accel_tags)}")
+    else:
+        hardware_lines.append("[dim]Accelerators:[/] CPU-only")
+    console.print(Panel("\n".join(hardware_lines), title="Hardware overview", border_style="green"))
+
+    if spec:
+        pkg_display = ""
+        if spec.packages:
+            pkg_display = ", ".join(p.to_install_string() for p in spec.packages[:8])
+            if len(spec.packages) > 8:
+                pkg_display += f" [dim]+{len(spec.packages) - 8} more[/]"
+        spec_table = Table(
+            title="Active spec",
+            border_style="blue",
+            show_header=False,
+            box=None,
+            padding=(0, 1),
+        )
+        spec_table.add_column("Field", style="dim", width=12)
+        spec_table.add_column("Value")
+        spec_table.add_row("Env ID", spec.env_id)
+        spec_table.add_row("Module", spec.module)
+        if spec.runtime_version:
+            spec_table.add_row("Runtime", spec.runtime_version)
+        if pkg_display:
+            spec_table.add_row("Packages", pkg_display)
+        if spec.env_path:
+            spec_table.add_row("Path", spec.env_path)
+        console.print(spec_table)
 
 
 def show_envs(envs_dir: Any) -> None:

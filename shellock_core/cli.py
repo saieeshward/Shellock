@@ -604,8 +604,9 @@ def profile() -> None:
     cwd = os.getcwd()
     profile = registry.load_profile()
     history = registry.load_history(cwd)
+    spec = registry.load_spec(cwd)
 
-    ui.show_profile(profile, history)
+    ui.show_profile(profile, history, spec)
 
 
 # ── rollback ────────────────────────────────────────────────────
