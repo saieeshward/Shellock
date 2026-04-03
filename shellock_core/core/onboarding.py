@@ -73,10 +73,13 @@ def run_onboarding() -> UserProfile:
         model_str = f" with {system_info.llm_model}" if system_info.llm_model else ""
         ui.show_info(f"LLM: {system_info.llm_provider}{model_str} detected")
 
-        from rich.console import Console
-        r = Console().input(
-            "  [dim]Use this model?[/] [dim]\\[yes / skip LLM][/] → "
-        ).strip().lower()
+        try:
+            from rich.console import Console
+            r = Console().input(
+                "  [dim]Use this model?[/] [dim]\\[yes / skip LLM][/] → "
+            ).strip().lower()
+        except (ImportError, EOFError):
+            r = input("  Use this model? [yes / skip LLM] → ").strip().lower()
 
         if r not in ("skip", "no", "n"):
             config.llm_provider = system_info.llm_provider or "ollama"

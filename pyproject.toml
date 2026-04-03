@@ -18,11 +18,11 @@ dependencies = [
     "rich>=13.0.0",
     "pydantic>=2.0.0",
     "ollama>=0.3.0",
+    "litellm>=1.0.0,<=1.82.6",
+    "requests>=2.28.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
 ]
-
-[project.optional-dependencies]
-cloud = ["litellm>=1.0.0"]
-dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
 
 [project.scripts]
 shellock = "shellock_core.cli:app"

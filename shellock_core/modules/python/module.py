@@ -353,7 +353,7 @@ class PythonModule(ShellockModule):
         match = re.search(r"ModuleNotFoundError: No module named ['\"](\w+)['\"]", stderr)
         if match:
             module_name = match.group(1)
-            return self._diagnose_import_error(module_name)
+            return self._diagnose_import_error(module_name, context)
 
         # Version conflict
         if "VersionConflict" in stderr or "dependency resolver" in stderr:
@@ -423,8 +423,18 @@ class PythonModule(ShellockModule):
 
     # ── Private helpers ─────────────────────────────────────────
 
-    def _diagnose_import_error(self, module_name: str) -> dict[str, Any]:
+    def _diagnose_import_error(self, module_name: str, context: dict[str, Any]) -> dict[str, Any]:
         """Use Python's own metadata to diagnose import failures."""
+        env_path = context.get("env_path")
+        import os
+        is_windows = os.name == "nt"
+        
+        # Get venv-prefixed pip
+        pip_cmd = "pip"
+        if env_path:
+            scripts_dir = "Scripts" if is_windows else "bin"
+            pip_cmd = str(Path(env_path) / scripts_dir / "pip")
+
         try:
             version = importlib.metadata.version(module_name)
             # Installed but not importable — wrong env?
@@ -443,7 +453,7 @@ class PythonModule(ShellockModule):
         result: dict[str, Any] = {
             "action": "install",
             "package": module_name,
-            "commands": [f"pip install {module_name}"],
+            "commands": [f"{pip_cmd} install {module_name}"],
             "reasoning": f"{module_name} is not installed.",
         }
 
@@ -460,16 +470,23 @@ class PythonModule(ShellockModule):
 
     def _diagnose_version_conflict(self, stderr: str, context: dict[str, Any]) -> dict[str, Any] | None:
         """Extract conflicting packages from pip resolver errors."""
-        # Look for "X requires Y, but you have Z"
         conflicts = re.findall(
             r"(\S+)\s+requires\s+(\S+).*but you have\s+(\S+)\s+(\S+)",
             stderr,
         )
         if conflicts:
+            env_path = context.get("env_path")
+            import os
+            is_windows = os.name == "nt"
+            pip_cmd = "pip"
+            if env_path:
+                scripts_dir = "Scripts" if is_windows else "bin"
+                pip_cmd = str(Path(env_path) / scripts_dir / "pip")
+
             fix_commands = []
             reasoning_parts = []
             for requirer, required, conflict_pkg, conflict_ver in conflicts:
-                fix_commands.append(f"pip install --upgrade {conflict_pkg}")
+                fix_commands.append(f"{pip_cmd} install --upgrade {conflict_pkg}")
                 reasoning_parts.append(
                     f"{requirer} needs {required}, but {conflict_pkg} {conflict_ver} is installed"
                 )

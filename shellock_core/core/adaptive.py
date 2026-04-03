@@ -36,7 +36,7 @@ def suggest_from_preferences(
         count = profile.preferences.get(category, {}).get(tool, 0)
         ui.show_adaptive(
             axis="preferences",
-            message=f"You've used '{tool}' {count} times before — adding it automatically.",
+            message=f"You've used '{tool}' {count} times — include it? [Y/n]",
         )
     return suggestions
 
@@ -90,12 +90,13 @@ def announce_error_escalation(occurrence_count: int) -> None:
 def announce_system_adaptations(
     system_context: dict[str, Any],
     module_name: str,
+    effective_llm_tier: str | None = None,
 ) -> None:
     """Announce adaptations based on detected system capabilities."""
     os_name = system_context.get("os", "")
     package_managers = system_context.get("package_managers", [])
     llm_provider = system_context.get("llm_provider")
-    llm_tier = system_context.get("llm_tier", "template")
+    llm_tier = effective_llm_tier or system_context.get("llm_tier", "template")
 
     # LLM tier adaptation
     if llm_tier == "local":

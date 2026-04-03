@@ -224,3 +224,77 @@ class TestNodeInstallHint:
         hint = _node_install_hint()
         assert isinstance(hint, str)
         assert len(hint) > 0
+
+
+class TestTemplateFallback:
+
+    def test_extract_template_key_picks_framework(self):
+        from shellock_core.cli import _extract_template_key
+        assert _extract_template_key("python 3.11 fastapi project with black") == "fastapi"
+        assert _extract_template_key("node react app with typescript") == "react"
+        assert _extract_template_key("a simple flask web app") == "flask"
+
+
+# ── Import scanner — local module filtering ────────────────────
+
+
+class TestImportScannerLocalModules:
+
+    def test_resolve_to_pypi_skips_local_py_files(self, tmp_path):
+        """Local .py file stems must not be returned as PyPI packages."""
+        from shellock_core.core.import_scanner import _resolve_to_pypi
+
+        (tmp_path / "app.py").write_text("x = 1")
+        (tmp_path / "utils.py").write_text("x = 1")
+
+        packages = _resolve_to_pypi({"app", "utils", "numpy"}, project_root=tmp_path)
+        assert "app" not in packages
+        assert "utils" not in packages
+        assert "numpy" in packages
+
+    def test_summarise_scan_truncated_flag(self, tmp_path):
+        """summarise_scan() must set truncated=True when file count hits max_files."""
+        from shellock_core.core.import_scanner import summarise_scan
+
+        # Create more files than the cap
+        for i in range(5):
+            (tmp_path / f"module_{i}.py").write_text("import numpy")
+
+        result = summarise_scan(str(tmp_path), max_files=3)
+        assert result["truncated"] is True
+
+    def test_summarise_scan_not_truncated(self, tmp_path):
+        """summarise_scan() must set truncated=False when under the cap."""
+        from shellock_core.core.import_scanner import summarise_scan
+
+        (tmp_path / "main.py").write_text("import flask")
+
+        result = summarise_scan(str(tmp_path), max_files=200)
+        assert result["truncated"] is False
+
+    def test_extract_imports_handles_value_error(self, tmp_path):
+        """_extract_imports() must return empty set on ValueError from ast.parse."""
+        from shellock_core.core.import_scanner import _extract_imports
+        from unittest.mock import patch
+        import ast
+
+        bad_file = tmp_path / "bad.py"
+        bad_file.write_text("x = 1")
+
+        with patch.object(ast, "parse", side_effect=ValueError("null byte")):
+            result = _extract_imports(bad_file)
+
+        assert result == set()
+
+    def test_extract_package_hints_lowercase(self):
+        """extract_package_hints() must return lowercase package names."""
+        from shellock_core.tools.web_search import extract_package_hints
+
+        results = [
+            {"title": "FastAPI", "snippet": "pip install FastAPI for fast APIs", "link": ""},
+            {"title": "", "snippet": "pypi.org/project/Pydantic", "link": ""},
+        ]
+        hints = extract_package_hints(results)
+        assert all(h == h.lower() for h in hints)
+        assert "fastapi" in hints
+        assert "pydantic" in hints

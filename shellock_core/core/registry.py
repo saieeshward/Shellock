@@ -25,6 +25,7 @@ else:
     _fcntl = None
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime
@@ -182,25 +183,62 @@ def get_recent_actions(project_path: str, n: int = 5) -> list[dict[str, Any]]:
     return [a.model_dump(mode="json") for a in recent]
 
 
+def mark_fix_successful(
+    project_path: str,
+    error_fingerprint: str,
+    fix: dict[str, Any] | None,
+) -> None:
+    """Record that a fix for the given error fingerprint succeeded.
+
+    This populates ``fixes_that_worked`` in error_frequency so that
+    Axis 2 (adaptive error patterns) can reuse known-good fixes.
+    """
+    if not fix:
+        return
+    history = load_history(project_path)
+    freq = history.error_frequency.get(error_fingerprint)
+    if freq is None:
+        return
+    fix_summary = json.dumps(fix, sort_keys=True)
+    if fix_summary not in freq.get("fixes_that_worked", []):
+        freq.setdefault("fixes_that_worked", []).append(fix_summary)
+        save_history(project_path, history)
+
+
 def check_cascading_error(
     project_path: str,
     error_fingerprint: str,
     window_minutes: int = 10,
+    error_text: str = "",
 ) -> str | None:
     """Check if this error was likely caused by a recent fix.
 
-    Returns the causing action ID, or None.
+    Only flags a causal link if the recent fix touched packages mentioned
+    in the current error. Returns the causing action ID, or None.
     """
     history = load_history(project_path)
     now = datetime.now()
 
-    # Look at recent fix actions
     for action in reversed(history.actions[-10:]):
         if action.type != ActionType.FIX:
             continue
         age = (now - action.timestamp).total_seconds() / 60
-        if age <= window_minutes:
-            return action.id
+        if age > window_minutes:
+            continue
+
+        # Require package overlap — don't blame unrelated fixes
+        if error_text and action.spec:
+            fix_packages = {
+                p.get("name", "").lower()
+                for p in action.spec.get("packages", [])
+                if p.get("name")
+            }
+            if fix_packages:
+                error_lower = error_text.lower()
+                if not any(pkg in error_lower for pkg in fix_packages):
+                    continue  # no overlap — skip this fix
+
+        return action.id
 
     return None
 
@@ -219,8 +257,12 @@ def load_spec(project_path: str) -> EnvSpec | None:
     """Load the active environment spec, if any."""
     spec_file = Path(project_path) / ".shellock" / "spec.json"
     if spec_file.exists():
-        data = json.loads(spec_file.read_text())
-        return EnvSpec.model_validate(data)
+        try:
+            data = json.loads(spec_file.read_text())
+            return EnvSpec.model_validate(data)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("Corrupted spec.json: %s — backing up and returning None", e)
+            _backup_corrupted(spec_file)
     return None
 
 
@@ -509,29 +551,26 @@ def _compact_history(project_path: str, history: ProjectHistory) -> None:
 
 
 def _write_json(path: Path, data: Any) -> None:
-    """Write JSON with file locking for concurrency safety (Unix) or simple write (Windows)."""
+    """Write JSON atomically using a temp file and rename.
+
+    On POSIX: writes to a .tmp sidecar then calls tmp.replace(path) which is
+    atomic — the data file is never in a partially-written state.
+    On Windows (_fcntl is None): falls back to a direct write (low concurrency
+    risk for a single-user CLI).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(data, indent=2, default=str) + "\n"
 
     if _fcntl is not None:
-        with open(path, "w") as f:
-            try:
-                _fcntl.flock(f.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                f.write(content)
-                _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
-            except BlockingIOError:
-                import time
-                for _ in range(50):
-                    time.sleep(0.1)
-                    try:
-                        _fcntl.flock(f.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                        f.write(content)
-                        _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
-                        return
-                    except BlockingIOError:
-                        continue
-                logger.error("Could not acquire lock on %s after 5s", path)
-                raise
+        import tempfile
+        fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            os.write(fd, content.encode())
+        finally:
+            os.close(fd)
+        Path(tmp_str).replace(path)
+        # Protect API keys: restrict config.json to owner read/write only
+        if path.name == "config.json":
+            path.chmod(0o600)
     else:
-        # Windows: no file locking (single-user CLI, low concurrency risk)
         path.write_text(content)

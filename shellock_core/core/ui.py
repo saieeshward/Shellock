@@ -746,3 +746,128 @@ def _plain_history(actions: list[dict[str, Any]]) -> None:
     print("\n--- Project History ---")
     for a in actions:
         print(f"  {a.get('id', '—')}  {a.get('type', '?')}  {a.get('result', '')}  {str(a.get('timestamp', ''))[:19]}")
+
+
+def show_profile(profile: Any, error_frequency: dict[str, Any] | None = None) -> None:
+    """Display the user model in full — the scrutability screen."""
+    if _plain_mode():
+        _plain_profile(profile, error_frequency)
+        return
+
+    from rich.console import Console
+    from rich.panel import Panel
+
+    console = Console()
+    console.print()
+    console.print(
+        Panel(
+            "[bold cyan]User Model[/]  [dim](what Shellock has learned about you)[/]",
+            border_style="cyan",
+            padding=(0, 2),
+        )
+    )
+
+    # System info
+    sys_info = profile.system if hasattr(profile, "system") else {}
+    sys_dict = sys_info.model_dump() if hasattr(sys_info, "model_dump") else dict(sys_info)
+    console.print()
+    console.print("  [bold]System[/]")
+    console.print(f"    OS:        {sys_dict.get('os', '?')} ({sys_dict.get('arch', '?')})")
+    console.print(f"    Shell:     {sys_dict.get('shell', '?')}")
+    gpu = sys_dict.get("gpu", "none")
+    vram = sys_dict.get("vram_gb")
+    gpu_label = f"{gpu}" + (f" ({vram}GB VRAM)" if vram else "")
+    console.print(f"    GPU:       {gpu_label}")
+    tier = sys_dict.get("llm_tier", "template")
+    provider = sys_dict.get("llm_provider") or "—"
+    model = sys_dict.get("llm_model") or "—"
+    console.print(f"    LLM tier:  {tier} ({provider} / {model})")
+
+    # Preferences
+    prefs = profile.preferences if hasattr(profile, "preferences") else {}
+    threshold = profile.suggestion_threshold if hasattr(profile, "suggestion_threshold") else 3
+    console.print()
+    console.print(f"  [bold]Preferences[/]  [dim](suggest after {threshold} uses)[/]")
+    if prefs:
+        for category, tools in prefs.items():
+            console.print(f"    [dim]{category}:[/]")
+            for tool, count in sorted(tools.items(), key=lambda x: -x[1]):
+                bar = "█" * min(count, 12)
+                will_suggest = " [green]← auto-suggest[/]" if count >= threshold else ""
+                console.print(f"      {tool:<20} {bar} {count} uses{will_suggest}")
+    else:
+        console.print("    [dim]No preferences recorded yet.[/]")
+
+    # Rejected suggestions
+    rejected = profile.rejected_suggestions if hasattr(profile, "rejected_suggestions") else []
+    if rejected:
+        console.print()
+        console.print("  [bold]Rejected suggestions[/]")
+        for r in rejected:
+            console.print(f"    [dim]✗ {r}[/]")
+
+    # Error patterns from current project history
+    if error_frequency:
+        console.print()
+        console.print(f"  [bold]Error patterns seen[/]  [dim]({len(error_frequency)} distinct)[/]")
+        for fp, data in list(error_frequency.items())[:10]:
+            count = data.get("count", 0)
+            pattern = data.get("pattern", "")[:60]
+            worked = len(data.get("fixes_that_worked", []))
+            fix_label = f"  [green]{worked} fix(es) learned[/]" if worked else ""
+            console.print(f"    [dim][{fp}][/] {pattern!r} ×{count}{fix_label}")
+    else:
+        console.print()
+        console.print("  [dim]No error patterns recorded for this project.[/]")
+
+    # Timestamps
+    created = str(getattr(profile, "created_at", "?"))[:10]
+    updated = str(getattr(profile, "last_updated", "?"))[:10]
+    console.print()
+    console.print(f"  [dim]Profile created: {created}  ·  Last updated: {updated}[/]")
+    console.print(f"  [dim]Stored at: ~/.shellock/profile.json[/]")
+    console.print()
+
+
+def prompt_web_search(query: str) -> bool:
+    """Ask the user if they want to use web search to enrich package resolution.
+
+    Returns True if the user approves.
+    """
+    if _plain_mode():
+        r = input(f"  Use web search to find packages for '{query}'? [yes/no] → ").strip().lower()
+        return r in ("yes", "y")
+
+    from rich.console import Console
+    console = Console()
+    console.print()
+    console.print(f"  [dim]Web search can find niche packages Shellock doesn't know about.[/]")
+    r = console.input(
+        f"  [yellow]Search the web for packages matching '{query}'?[/] [dim]\\[yes/no][/] → "
+    ).strip().lower()
+    return r in ("yes", "y")
+
+
+def _plain_profile(profile: Any, error_frequency: dict[str, Any] | None = None) -> None:
+    print("\n--- User Model ---\n")
+    sys_dict = profile.system.model_dump() if hasattr(profile.system, "model_dump") else {}
+    print(f"  OS:     {sys_dict.get('os', '?')} ({sys_dict.get('arch', '?')})")
+    print(f"  Shell:  {sys_dict.get('shell', '?')}")
+    print(f"  GPU:    {sys_dict.get('gpu', 'none')}")
+    print(f"  LLM:    {sys_dict.get('llm_tier', 'template')}")
+    print()
+    threshold = getattr(profile, "suggestion_threshold", 3)
+    print(f"  Preferences (suggest after {threshold} uses):")
+    for cat, tools in getattr(profile, "preferences", {}).items():
+        print(f"    {cat}:")
+        for tool, count in sorted(tools.items(), key=lambda x: -x[1]):
+            flag = " [auto-suggest]" if count >= threshold else ""
+            print(f"      {tool}: {count} uses{flag}")
+    rejected = getattr(profile, "rejected_suggestions", [])
+    if rejected:
+        print(f"\n  Rejected: {', '.join(rejected)}")
+    if error_frequency:
+        print(f"\n  Error patterns ({len(error_frequency)}):")
+        for fp, data in list(error_frequency.items())[:10]:
+            print(f"    [{fp}] {data.get('pattern', '')[:50]!r} ×{data.get('count', 0)}")
+    print()

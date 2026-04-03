@@ -181,6 +181,8 @@ class SystemInfo(BaseModel):
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_tier: LLMTier = LLMTier.TEMPLATE
+    gpu: str = "none"
+    vram_gb: float | None = None
 
 
 class UserProfile(BaseModel):
@@ -250,3 +252,9 @@ class ShelllockConfig(BaseModel):
     llm_api_key: str | None = Field(default=None, description="Only for cloud providers")
     plain_mode: bool = Field(default=False, description="Disable Rich formatting")
     history_compaction_threshold: int = 200
+    web_search_enabled: bool = Field(default=False, description="Allow Serper web search to enrich package resolution")
+    serper_api_key: str | None = Field(default=None, description="Serper API key for web search")
+    knowledge_fetch_enabled: bool = Field(
+        default=True,
+        description="Fetch package metadata from PyPI/npm to verify and correct alias names",
+    )

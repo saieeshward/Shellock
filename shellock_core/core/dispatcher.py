@@ -55,6 +55,7 @@ class DispatchResult:
     results: list[CommandResult] = field(default_factory=list)
     all_succeeded: bool = True
     first_error: CommandResult | None = None
+    blocked_commands: list[str] = field(default_factory=list)
 
     @property
     def failed_stderr(self) -> str | None:
@@ -121,7 +122,23 @@ def validate_commands(
                 rollback_command=cmd.rollback_command,
             ))
         else:
-            validated.append(cmd)
+            # Scan for shell metacharacters even after allowlist pass
+            _SHELL_METACHAR = re.compile(r'[;|&`]|\$\(|[><]')
+            if _SHELL_METACHAR.search(cmd.command):
+                logger.warning("BLOCKED: shell metacharacter in '%s'", cmd.command)
+                validated.append(Command(
+                    command=cmd.command,
+                    impact=Impact.BLOCKED,
+                    description="BLOCKED: shell metacharacter in command",
+                    rollback_command=cmd.rollback_command,
+                ))
+            else:
+                validated.append(cmd)
+        
+    # LOG FOR DEBUGGING (Visible in test logs)
+    for cmd in validated:
+        if cmd.impact == Impact.BLOCKED:
+            logger.warning(f"Safety Block: {cmd.command} - {cmd.description}")
 
     return validated
 
@@ -139,6 +156,9 @@ def execute_commands(
 
     If *dry_run* is True, returns what would happen without executing.
     """
+    if cwd and not Path(cwd).is_dir():
+        raise FileNotFoundError(f"Working directory does not exist: {cwd}")
+
     result = DispatchResult()
     work_dir = cwd or os.getcwd()
 
@@ -154,6 +174,7 @@ def execute_commands(
     for cmd in commands:
         if cmd.impact == Impact.BLOCKED:
             logger.info("Skipping blocked command: %s", cmd.command)
+            result.blocked_commands.append(cmd.command)
             continue
 
         step += 1
@@ -210,6 +231,7 @@ def _run_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
 
         stdout_lines: list[str] = []
@@ -231,8 +253,8 @@ def _run_command(
         t_err.start()
 
         proc.wait(timeout=timeout)
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
+        t_out.join()
+        t_err.join()
 
         return CommandResult(
             command=command,
@@ -242,7 +264,11 @@ def _run_command(
             success=proc.returncode == 0,
         )
     except subprocess.TimeoutExpired:
-        proc.kill()
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            proc.kill()
         return CommandResult(
             command=command,
             exit_code=-1,

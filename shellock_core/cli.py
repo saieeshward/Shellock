@@ -12,6 +12,7 @@ Commands:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -79,21 +80,25 @@ def _activate_env(env_name: str, env_path: str) -> None:
         pass
 
 
-def _check_conflicts(spec: "EnvSpec", module: "ShellockModule") -> str | None:
-    """Run a quick conflict pre-detection before install."""
-    import subprocess
-    if module.name == "python" and spec.packages:
-        pkg_names = [p.to_install_string() for p in spec.packages]
-        try:
-            result = subprocess.run(
-                ["pip", "install", "--dry-run", "--report", "-", *pkg_names],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0 and "conflict" in result.stderr.lower():
-                return result.stderr[:200]
-        except Exception:
-            pass
-    return None
+# TODO: conflict pre-detection — run after venv creation using venv's own pip binary
+# e.g. Path(spec.env_path) / "bin" / "pip" rather than system pip
+
+
+def _extract_template_key(description: str) -> str:
+    """Extract the most likely template keyword from a natural language description.
+
+    Used as fallback when no LLM is available. Picks the first word that
+    looks like a framework/tool name (not a version number or filler word).
+    """
+    stopwords = {"python", "node", "a", "an", "the", "with", "and", "for",
+                 "project", "app", "application", "new", "simple", "basic"}
+    version_pattern = re.compile(r"^\d+(\.\d+)*$")
+    words = description.lower().split()
+    for word in words:
+        clean = re.sub(r"[^a-z0-9.]", "", word)
+        if clean and clean not in stopwords and not version_pattern.match(clean):
+            return clean
+    return words[0] if words else "default"
 
 
 def _infer_module_from_description(description: str) -> "ShellockModule":
@@ -173,31 +178,64 @@ def init(
     proj_context = context.detect_project_context(cwd)
     introspection = active_module.introspect(cwd)
 
+    # Determine effective LLM tier early so announcements are accurate
+    effective_tier = sys_context.llm_tier
+    if effective_tier == LLMTier.TEMPLATE and config.llm_api_key:
+        effective_tier = LLMTier.CLOUD
+
     # Axis 3: System context announcements
-    adaptive.announce_system_adaptations(sys_context.model_dump(), active_module.name)
+    adaptive.announce_system_adaptations(
+        sys_context.model_dump(), active_module.name,
+        effective_llm_tier=effective_tier.value,
+    )
+
+    # GPU-aware announcement
+    if sys_context.gpu != "none":
+        vram_label = f" ({sys_context.vram_gb}GB VRAM)" if sys_context.vram_gb else ""
+        adaptive.announce_module_detection(
+            active_module.name,
+            f"{sys_context.gpu.upper()} GPU detected{vram_label} — will suggest GPU-optimised packages",
+        )
+
+    # AST import scan — used when no dep files exist (brownfield projects)
+    scanned_imports: list[str] = []
+    if not proj_context.get("files") and active_module.name == "python":
+        from shellock_core.core.import_scanner import scan_project_imports
+        scanned_imports = scan_project_imports(cwd)
+        if scanned_imports:
+            ui.show_info(f"No dep files found — scanned source imports: {', '.join(scanned_imports[:8])}"
+                         + (f" +{len(scanned_imports) - 8} more" if len(scanned_imports) > 8 else ""))
 
     full_context = {
         "system": sys_context.model_dump(),
         "project": proj_context,
         "introspection": introspection,
+        "scanned_imports": scanned_imports,
     }
+
+    # Enrich description with scanned imports so LLM has full picture
+    enriched_description = description
+    if scanned_imports:
+        enriched_description = (
+            f"{description} (imports detected in source: {', '.join(scanned_imports[:15])})"
+        )
 
     # Generate spec (LLM or template)
     if template:
         spec_dict = active_module.build_spec(template, full_context)
     else:
-        llm = LLMClient(config, sys_context.llm_tier)
+        llm = LLMClient(config, effective_tier)
         if llm.is_available():
             # Show which LLM tier we're using
-            if sys_context.llm_tier == LLMTier.LOCAL and llm._check_ollama():
+            if effective_tier == LLMTier.LOCAL and llm._check_ollama():
                 ui.show_info(f"LLM: {config.llm_model} via Ollama (local)")
             elif config.llm_api_key:
                 ui.show_info(f"LLM: Gemini 2.0 Flash via cloud (free tier)")
             else:
-                tier_label = sys_context.llm_tier.value
+                tier_label = effective_tier.value
                 ui.show_info(f"LLM: {config.llm_model} via {tier_label}")
             spec_dict = llm.generate_spec(
-                description=description,
+                description=enriched_description,
                 module_name=active_module.name,
                 system_context=sys_context.model_dump(),
                 user_preferences=profile.preferences,
@@ -217,11 +255,30 @@ def init(
             import shutil
             if shutil.which("ollama"):
                 ui.show_warning("Ollama installed but not running. Start with: ollama serve")
-            if config.llm_api_key:
-                ui.show_info("Trying Gemini cloud fallback...")
-            else:
-                ui.show_info("No LLM available — using template mode.")
+            ui.show_info("No LLM available — using template mode.")
             spec_dict = active_module.build_spec(description, full_context)
+
+    # Web search enrichment — user-gated, opt-in only
+    if config.web_search_enabled and config.serper_api_key and not template:
+        from shellock_core.tools import web_search as _ws
+        if _ws.is_available():
+            use_web = yes or ui.prompt_web_search(description)
+            if use_web:
+                ui.show_info("Searching the web for packages...")
+                results = _ws.search_packages(description, config.serper_api_key)
+                hints = _ws.extract_package_hints(results)
+                if hints:
+                    ui.show_info(f"Web search found hints: {', '.join(hints[:6])}")
+                    # Add hints to spec_dict packages if not already present
+                    existing = {p.get("name", p) if isinstance(p, dict) else p
+                                for p in spec_dict.get("packages", [])}
+                    for hint in hints:
+                        if hint.lower() not in {n.lower() for n in existing}:
+                            spec_dict.setdefault("packages", []).append({"name": hint})
+                else:
+                    ui.show_info("Web search returned no package hints.")
+        else:
+            ui.show_warning("Web search enabled but 'requests' is not installed. Run: pip install shellock[serper]")
 
     # Build the EnvSpec
     try:
@@ -241,16 +298,30 @@ def init(
                 p if isinstance(p, dict) else {"name": p}
                 for p in spec_dict["packages"]
             ]
+
+        # Knowledge enrichment: fix aliases and canonical names (e.g. sklearn → scikit-learn)
+        if config.knowledge_fetch_enabled:
+            from shellock_core.core.knowledge import get_knowledge_manager
+            km = get_knowledge_manager()
+            ecosystem = "npm" if active_module.name == "node" else "pypi"
+            spec_dict, corrections = km.verify_and_enrich(spec_dict, ecosystem)
+            for correction in corrections:
+                ui.show_info(f"Package corrected: {correction}")
+
         spec = EnvSpec.model_validate(spec_dict)
     except Exception as e:
         ui.show_error(f"Invalid spec: {e}")
         raise typer.Exit(1)
 
-    # Axis 1: Suggest tools from user preferences
+    # Axis 1: Suggest tools from user preferences (prompt user; auto-accept with --yes)
     current_pkg_names = [p.name for p in spec.packages]
     suggested = adaptive.suggest_from_preferences(profile, "tools", current_pkg_names)
     for tool in suggested:
-        spec.packages.append(PackageSpec(name=tool))
+        count = profile.preferences.get("tools", {}).get(tool, 0)
+        if yes or typer.confirm(
+            f"You've used '{tool}' {count} times — include it?", default=True
+        ):
+            spec.packages.append(PackageSpec(name=tool))
 
     # Ensure env_path is set
     if not spec.env_path:
@@ -324,21 +395,24 @@ def init(
 
     to_run = [cmd for cmd in validated if cmd.impact != Impact.BLOCKED]
 
-    # Conflict pre-detection dry run (pip check / npm ls)
-    if not dry_run and spec.packages:
-        conflicts = _check_conflicts(spec, active_module)
-        if conflicts:
-            ui.show_warning(f"Potential conflicts detected: {conflicts}")
-            if not yes:
-                ui.show_info("Proceeding anyway (conflicts may resolve during install).")
-
     # Execute
-    result = dispatcher.execute_commands(
-        to_run,
-        cwd=cwd,
-        env_override=spec.env_vars or None,
-        dry_run=dry_run,
-    )
+    try:
+        result = dispatcher.execute_commands(
+            to_run,
+            cwd=cwd,
+            env_override=spec.env_vars or None,
+            dry_run=dry_run,
+        )
+    except FileNotFoundError as e:
+        ui.show_error(str(e))
+        raise typer.Exit(1)
+
+    # Report blocked commands — always warn; fail loudly in CI (--yes)
+    if result.blocked_commands:
+        for blocked_cmd in result.blocked_commands:
+            ui.show_warning(f"Blocked command skipped: {blocked_cmd}")
+        if yes:
+            raise typer.Exit(1)
 
     # Record in audit trail
     registry.save_spec(cwd, spec)
@@ -407,6 +481,7 @@ def fix(
         Command,
         DiagnosisMethod,
         DiagnosisResult,
+        LLMTier,
     )
 
     _check_onboarding()
@@ -448,7 +523,7 @@ def fix(
     fingerprint = registry.fingerprint_error(error_text)
 
     # Check for cascading errors (fix caused a new error)
-    caused_by = registry.check_cascading_error(cwd, fingerprint)
+    caused_by = registry.check_cascading_error(cwd, fingerprint, error_text=error_text)
     if caused_by:
         ui.show_warning(f"This may be caused by a recent fix ({caused_by})")
 
@@ -468,6 +543,7 @@ def fix(
     error_context = {
         "system": sys_context.model_dump(),
         "project": context.detect_project_context(cwd),
+        "env_path": spec.env_path,
         "introspection": active_module.introspect(cwd),
         "recent_actions": registry.get_recent_actions(cwd),
         "caused_by": caused_by,
@@ -501,9 +577,12 @@ def fix(
 
     # Layer 3: LLM diagnosis (smart, slower)
     if not diagnosis:
-        llm = LLMClient(config, sys_context.llm_tier)
+        effective_tier = sys_context.llm_tier
+        if effective_tier == LLMTier.TEMPLATE and config.llm_api_key:
+            effective_tier = LLMTier.CLOUD
+        llm = LLMClient(config, effective_tier)
         if llm.is_available():
-            tier_label = "Ollama (local)" if sys_context.llm_tier.value == "local" else sys_context.llm_tier.value
+            tier_label = "Ollama (local)" if effective_tier.value == "local" else effective_tier.value
             ui.show_info(f"Consulting LLM ({config.llm_model} via {tier_label})...")
             llm_result = llm.diagnose_error(
                 stderr=error_text,
@@ -553,7 +632,13 @@ def fix(
                 active_module.blocked_patterns,
             )
 
+            # DEBUG: Audit Point 1
+            logger.info(f"Applying fix with {len(validated)} commands")
+            
             result = dispatcher.execute_commands(validated, cwd=cwd)
+
+            # DEBUG: Audit Point 2
+            logger.info("Commands executed. Recording to registry...")
 
             registry.record_action(
                 project_path=cwd,
@@ -567,8 +652,19 @@ def fix(
                 diagnosis_method=diagnosis.method,
             )
 
+            # DEBUG: Audit Point 3
+            logger.info("Registry updated.")
+
+            # Report blocked commands in fix flow as well
+            if result.blocked_commands:
+                for blocked_cmd in result.blocked_commands:
+                    ui.show_warning(f"Blocked command skipped: {blocked_cmd}")
+
             if result.all_succeeded:
                 ui.show_success("Fix applied successfully")
+                # Record that this fix worked so Axis 2 can reuse it
+                if fingerprint:
+                    registry.mark_fix_successful(cwd, fingerprint, diagnosis.fix)
             else:
                 ui.show_error("Fix failed. Check the output above.")
     elif not diagnosis.diagnosed:
@@ -800,6 +896,101 @@ def config(
         ui.show_error(f"Unknown config key: {key}")
 
 
+# ── profile ─────────────────────────────────────────────────────
+
+
+@app.command()
+def profile() -> None:
+    """Show what Shellock has learned about you (user model + error patterns)."""
+    from shellock_core.core import registry, ui
+
+    user_profile = registry.load_profile()
+
+    # Load error patterns for the current project if we're in one
+    cwd = os.getcwd()
+    history = registry.load_history(cwd)
+    error_frequency = history.error_frequency if history.error_frequency else None
+
+    ui.show_profile(user_profile, error_frequency)
+
+
+# ── update ──────────────────────────────────────────────────────
+
+
+@app.command()
+def update(
+    package: Optional[str] = typer.Argument(
+        None, help="Package name to fetch/refresh (omit to see cache stats)"
+    ),
+    all_packages: bool = typer.Option(
+        False, "--all", help="Refresh all stale cache entries"
+    ),
+    ecosystem: str = typer.Option(
+        "pypi", "--ecosystem", "-e", help="Package ecosystem: pypi or npm"
+    ),
+) -> None:
+    """Fetch or refresh package metadata in the local knowledge cache.
+
+    Examples:
+      shellock update fastapi
+      shellock update next --ecosystem npm
+      shellock update --all
+    """
+    from shellock_core.core import ui
+    from shellock_core.core.knowledge import get_knowledge_manager
+
+    km = get_knowledge_manager()
+
+    if all_packages:
+        ui.show_info(f"Refreshing stale {ecosystem} cache entries...")
+        count = km.refresh_stale(ecosystem=ecosystem)
+        if count:
+            ui.show_success(f"Refreshed {count} stale entr{'y' if count == 1 else 'ies'}.")
+        else:
+            ui.show_info("All cache entries are up to date.")
+        stats = km.cache_stats()
+        ui.show_info(
+            f"Cache: {stats['total']} total, {stats['stale']} stale"
+            + (f" — {stats['by_ecosystem']}" if stats["by_ecosystem"] else "")
+        )
+        return
+
+    if package:
+        ui.show_info(f"Fetching {ecosystem} metadata for '{package}'...")
+        meta = km.get_or_fetch(package, ecosystem)
+        if meta and meta.get("exists"):
+            canonical = meta.get("name", package)
+            summary = meta.get("summary", "")
+            if canonical != package:
+                ui.show_success(f"Found: {canonical} (canonical name differs from '{package}')")
+            else:
+                ui.show_success(f"Found: {canonical}")
+            if summary:
+                ui.show_info(f"  {summary[:120]}")
+            home = meta.get("home_page", "")
+            if home:
+                ui.show_info(f"  {home}")
+        else:
+            ui.show_warning(
+                f"'{package}' not found on {ecosystem} (or network unavailable)."
+            )
+        return
+
+    # No arguments — show cache stats
+    stats = km.cache_stats()
+    if stats["total"] == 0:
+        ui.show_info("Knowledge cache is empty. Run 'shellock update <package>' to populate it.")
+    else:
+        ui.show_info(
+            f"Knowledge cache: {stats['total']} packages"
+            f", {stats['stale']} stale (>7 days)"
+        )
+        for eco, count in stats["by_ecosystem"].items():
+            ui.show_info(f"  {eco}: {count}")
+        if stats["stale"]:
+            ui.show_info("Run 'shellock update --all' to refresh stale entries.")
+
+
 # ── version ─────────────────────────────────────────────────────
 
 
@@ -857,9 +1048,10 @@ def info(
 @app.command(name="export")
 def export_env(
     env_name: Optional[str] = typer.Argument(None, help="Environment name"),
+    fmt: str = typer.Option("json", "--format", "-f", help="Format: json | requirements | dockerfile | devcontainer"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
 ) -> None:
-    """Export an environment spec to a portable JSON file."""
+    """Export an environment spec to json, requirements.txt, Dockerfile, or devcontainer.json."""
     import json as _json
     from shellock_core.core import registry, ui
 
@@ -869,13 +1061,77 @@ def export_env(
         ui.show_error("No Shellock environment found in this directory.")
         raise typer.Exit(1)
 
-    export_data = spec.model_dump(mode="json")
-    export_data.pop("approved", None)
-    export_data.pop("created_at", None)
+    if fmt == "json":
+        export_data = spec.model_dump(mode="json")
+        export_data.pop("approved", None)
+        export_data.pop("created_at", None)
+        out_path = output or f"shellock-{spec.env_id}.json"
+        Path(out_path).write_text(_json.dumps(export_data, indent=2) + "\n")
 
-    out_path = output or f"shellock-{spec.env_id}.json"
-    Path(out_path).write_text(_json.dumps(export_data, indent=2) + "\n")
-    ui.show_success(f"Exported to {out_path}")
+    elif fmt == "requirements":
+        if spec.module != "python":
+            ui.show_error("requirements.txt export is only supported for Python environments.")
+            raise typer.Exit(1)
+        lines = [p.to_install_string() for p in spec.packages]
+        out_path = output or "requirements.txt"
+        Path(out_path).write_text("\n".join(lines) + "\n")
+
+    elif fmt == "dockerfile":
+        py_ver = spec.runtime_version or "3.11"
+        if spec.module == "python":
+            pkgs = " ".join(p.to_install_string() for p in spec.packages)
+            lines = [
+                f"FROM python:{py_ver}-slim",
+                "WORKDIR /app",
+                "COPY . .",
+                f"RUN pip install --no-cache-dir {pkgs}" if pkgs else "# no packages",
+                *[f"ENV {k}={v}" for k, v in spec.env_vars.items()],
+                'CMD ["python", "app.py"]',
+            ]
+        elif spec.module == "node":
+            lines = [
+                "FROM node:lts-slim",
+                "WORKDIR /app",
+                "COPY package*.json ./",
+                "RUN npm ci",
+                "COPY . .",
+                *[f"ENV {k}={v}" for k, v in spec.env_vars.items()],
+                'CMD ["node", "index.js"]',
+            ]
+        else:
+            ui.show_error(f"Dockerfile export not supported for module '{spec.module}'.")
+            raise typer.Exit(1)
+        out_path = output or "Dockerfile"
+        Path(out_path).write_text("\n".join(lines) + "\n")
+
+    elif fmt == "devcontainer":
+        py_ver = spec.runtime_version or "3.11"
+        if spec.module == "python":
+            image = f"python:{py_ver}"
+            post_cmd = ("pip install " + " ".join(p.to_install_string() for p in spec.packages)) if spec.packages else ""
+        elif spec.module == "node":
+            image = "node:lts"
+            post_cmd = "npm install"
+        else:
+            image = "ubuntu:22.04"
+            post_cmd = ""
+
+        devcontainer: dict = {
+            "name": spec.env_id,
+            "image": image,
+            "features": {},
+            "postCreateCommand": post_cmd,
+            "remoteEnv": spec.env_vars,
+        }
+        out_path = output or ".devcontainer/devcontainer.json"
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(_json.dumps(devcontainer, indent=2) + "\n")
+
+    else:
+        ui.show_error(f"Unknown format '{fmt}'. Use: json | requirements | dockerfile | devcontainer")
+        raise typer.Exit(1)
+
+    ui.show_success(f"Exported ({fmt}) → {out_path}")
 
 
 # ── import ─────────────────────────────────────────────────────

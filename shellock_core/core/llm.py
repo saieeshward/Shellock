@@ -153,6 +153,10 @@ class LLMClient:
 
         Returns a diagnosis dict on success, None if the LLM fails.
         """
+        # Truncate stderr to avoid overflowing LLM context window:
+        # keep first 1500 and last 1500 chars (error class is usually at the end)
+        if len(stderr) > 3000:
+            stderr = stderr[:1500] + "\n... [truncated] ...\n" + stderr[-1500:]
         prompt = ERROR_PROMPT.format(
             system_context=json.dumps(system_context, indent=2),
             stderr=stderr,
@@ -186,6 +190,14 @@ class LLMClient:
             logger.warning("LLM output not valid JSON (attempt %d/%d)", attempt, MAX_RETRIES)
 
         logger.error("LLM failed after %d attempts", MAX_RETRIES)
+        try:
+            from shellock_core.core import ui
+            ui.show_warning(
+                "LLM failed to produce valid output after 3 attempts — "
+                "falling back to template mode."
+            )
+        except Exception:
+            pass
         return None
 
     def _call_llm(self, prompt: str) -> str | None:
@@ -213,7 +225,7 @@ class LLMClient:
                 prompt=prompt,
                 options={"temperature": 0.1},  # low temp for structured output
             )
-            return response.get("response", "")
+            return getattr(response, "response", None) or ""
         except ImportError:
             logger.error("ollama package not installed")
             return None
@@ -225,6 +237,9 @@ class LLMClient:
         """Call a cloud LLM via litellm (defaults to Gemini 2.0 Flash)."""
         try:
             import litellm
+
+            # Suppress litellm's noisy stderr banners
+            litellm.suppress_debug_info = True
 
             # Use Gemini model for cloud tier, unless user overrode in config
             model = self.CLOUD_MODEL

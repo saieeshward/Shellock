@@ -21,6 +21,7 @@ from shellock_core.core.schemas import LLMTier, SystemInfo
 
 def detect_system() -> SystemInfo:
     """Detect the current system's capabilities."""
+    gpu, vram = _detect_gpu()
     return SystemInfo(
         os=_detect_os(),
         arch=platform.machine(),
@@ -29,6 +30,8 @@ def detect_system() -> SystemInfo:
         llm_provider=_detect_llm_provider(),
         llm_model=_detect_llm_model(),
         llm_tier=_detect_llm_tier(),
+        gpu=gpu,
+        vram_gb=vram,
     )
 
 
@@ -180,6 +183,42 @@ def _check_port(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> boo
             return True
     except (ConnectionRefusedError, TimeoutError, OSError):
         return False
+
+
+def _detect_gpu() -> tuple[str, float | None]:
+    """Detect GPU type and VRAM.
+
+    Returns (gpu_type, vram_gb) where gpu_type is one of:
+    "cuda"  — NVIDIA GPU via nvidia-smi
+    "mps"   — Apple Silicon Metal Performance Shaders
+    "none"  — CPU only
+    """
+    # NVIDIA CUDA — try nvidia-smi
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split(",")
+            vram = float(parts[1].strip()) / 1024 if len(parts) > 1 else None  # MiB → GiB
+            return "cuda", round(vram, 1) if vram else None
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+
+    # Apple Silicon MPS — arm64 mac
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        try:
+            result = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and "Apple" in result.stdout:
+                return "mps", None
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    return "none", None
 
 
 def _has_internet(host: str = "1.1.1.1", port: int = 443, timeout: float = 2.0) -> bool:
