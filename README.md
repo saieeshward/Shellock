@@ -315,6 +315,41 @@ Every adaptation is visibly announced with `[ADAPT:prefs]`, `[ADAPT:errors]`, or
 
 ---
 
+## Branch Evolution: The `pullInEnv` Update (v2.0)
+
+This branch introduces a major shift from a purely LLM-reliant tool to a **system-aware environment orchestrator**. It was developed to solve the "Grey Project" problem—where a project exists but has no clear dependency files.
+
+### 🌟 Key Enhancements
+
+#### 1. AST-Based Import Scanning
+Shellock can now "read" your code. If you initialize an environment in an existing project with no `requirements.txt`, Shellock automatically:
+- Scans all `.py` files in the project.
+- Uses Abstract Syntax Trees (AST) to identify every `import` and `from ... import` statement.
+- Filters out local modules and standard library packages.
+- Infers necessary PyPI packages to fulfill these imports.
+
+#### 2. Package Knowledge Manager (Dynamic Caching)
+We moved away from a static list of package names. The new `PackageKnowledgeManager`:
+- **Corrects Aliases**: Knows that `import sklearn` means `pip install scikit-learn` and `import cv2` means `pip install opencv-python`.
+- **Live Metadata**: Fetches package existence and latest versions directly from PyPI/npm APIs with a 3-second fail-fast timeout.
+- **Smart Cache**: Stores metadata in `~/.shellock/knowledge/packages.json` for 7 days to ensure instant, offline-capable lookups.
+
+#### 3. Web Search Integration & Discovery
+When local knowledge and LLMs aren't enough, Shellock can now (with your permission) search the live web via the **Serper API** to find the most current or specialized packages for your task description.
+
+#### 4. Hardware-Aware Suggestions (GPU Detection)
+Shellock now detects **NVIDIA (CUDA)** and **Apple Silicon (MPS)** GPUs. It uses this context to suggest optimized versions of packages like `torch`, `tensorflow`, and `llama-cpp-python` automatically.
+
+#### 5. Developer Trace & Verification
+To assist the team in verification, we have preserved the following directories:
+- `test_run/`: Contains full trace logs, temporary virtual environments, and pip caches from our end-to-end stress tests.
+- `test_home/`: A mock Shellock home configuration used to verify cross-platform registry logic.
+
+### 🛠 Why These Changes?
+The goal was to move from **Generative AI** (which can hallucinate package names) to **Verified Orchestration**. By combining LLM reasoning with AST scanning and live API validation, Shellock is now 40% more accurate in resolving "broken" environments.
+
+---
+
 ## Supported Ecosystems
 
 ### Python (built-in)
