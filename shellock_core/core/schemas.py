@@ -136,6 +136,7 @@ class ActionEntry(BaseModel):
     type: ActionType
     spec: dict[str, Any] | None = None
     commands_run: list[str] = Field(default_factory=list)
+    rollback_commands: list[str] = Field(default_factory=list)
     result: str = ""
     failed_stderr: str | None = Field(
         default=None,

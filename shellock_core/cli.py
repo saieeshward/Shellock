@@ -12,6 +12,7 @@ Commands:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -358,12 +359,14 @@ def init(
     )
 
     # Record in audit trail
+    rollback_cmds = [cmd.rollback_command for cmd in reversed(to_run) if cmd.rollback_command]
     registry.save_spec(cwd, spec)
     registry.record_action(
         project_path=cwd,
         action_type=ActionType.INIT,
         spec=spec.model_dump(mode="json"),
         commands_run=[r.command for r in result.results],
+        rollback_commands=rollback_cmds,
         result="success" if result.all_succeeded else "failed",
         failed_stderr=result.failed_stderr if not result.all_succeeded else None,
     )
@@ -572,10 +575,19 @@ def fix(
 
             result = dispatcher.execute_commands(validated, cwd=cwd)
 
+            # Derive rollback commands: pip install X → pip uninstall -y X
+            fix_rollback_cmds = []
+            for cmd_str in fix_commands:
+                m = re.match(r'^(.*?\bpip\d*(?:\.exe)?)\s+install\s+(.+)$', cmd_str.strip())
+                if m:
+                    pip_exe, pkgs = m.group(1), m.group(2)
+                    fix_rollback_cmds.append(f"{pip_exe} uninstall -y {pkgs}")
+
             registry.record_action(
                 project_path=cwd,
                 action_type=ActionType.FIX,
                 commands_run=[r.command for r in result.results],
+                rollback_commands=fix_rollback_cmds,
                 result="success" if result.all_succeeded else "failed",
                 trigger_error=error_text[:200],
                 error_fingerprint=fingerprint,
@@ -653,12 +665,15 @@ def profile() -> None:
 @app.command()
 def rollback(
     action_id: Optional[str] = typer.Argument(
-        None, help="ID of the action to rollback (defaults to last action)"
+        None, help="ID of the action to rollback (defaults to last non-rollback action)"
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Undo a previous action."""
-    from shellock_core.core import registry, ui
-    from shellock_core.core.schemas import ActionType
+    """Undo a previous action by executing its stored rollback commands."""
+    from shellock_core.core import dispatcher, registry, ui
+    from shellock_core.core.schemas import ActionType, EnvSpec
+
+    _check_onboarding()
 
     cwd = os.getcwd()
     history = registry.load_history(cwd)
@@ -667,28 +682,89 @@ def rollback(
         ui.show_error("No actions to rollback.")
         raise typer.Exit(1)
 
-    # Find the action to rollback
+    # Find the target action (skip ROLLBACK entries when defaulting)
     if action_id:
         target = next((a for a in history.actions if a.id == action_id), None)
         if not target:
             ui.show_error(f"Action '{action_id}' not found.")
             raise typer.Exit(1)
     else:
-        target = history.actions[-1]
+        target = next(
+            (a for a in reversed(history.actions) if a.type != ActionType.ROLLBACK),
+            None,
+        )
+        if not target:
+            ui.show_error("No eligible actions to rollback.")
+            raise typer.Exit(1)
 
-    ui.show_info(f"Rolling back action: {target.id} ({target.type.value})")
-    ui.show_info(f"Commands that were run: {', '.join(target.commands_run[:5])}")
+    # Guard: rollback_commands may be absent on old history entries
+    if not target.rollback_commands:
+        ui.show_error(
+            f"Action '{target.id}' has no stored rollback commands.\n"
+            "This action was recorded before rollback support was added, "
+            "or the module emits no rollback commands for this action type."
+        )
+        ui.show_info("You can manually undo by running the appropriate commands.")
+        raise typer.Exit(1)
 
-    # Record the rollback
+    ui.show_info(f"Target action: {target.id} ({target.type.value}) @ {str(target.timestamp)[:16]}")
+
+    # Confirmation gate (skipped with --yes)
+    if not yes:
+        confirmed = ui.show_rollback_plan(target.id, target.type.value, target.rollback_commands)
+        if not confirmed:
+            ui.show_info("Rollback cancelled.")
+            raise typer.Exit(0)
+
+    # Execute rollback commands (bypasses allowlist/blocked-pattern checks)
+    ui.show_info("Executing rollback commands...")
+    rollback_result = dispatcher.execute_rollback_commands(
+        target.rollback_commands,
+        cwd=cwd,
+    )
+
+    # Restore the previous spec: walk backwards to find the entry just before target
+    previous_spec: "EnvSpec | None" = None
+    found_target = False
+    for action in reversed(history.actions):
+        if found_target and action.spec is not None:
+            try:
+                previous_spec = EnvSpec.model_validate(action.spec)
+            except Exception:
+                pass
+            break
+        if action.id == target.id:
+            found_target = True
+
+    if rollback_result.all_succeeded:
+        if previous_spec is not None:
+            registry.save_spec(cwd, previous_spec)
+            ui.show_info(f"Restored spec to state before '{target.id}'.")
+        else:
+            spec_file = Path(cwd) / ".shellock" / "spec.json"
+            if spec_file.exists():
+                spec_file.unlink()
+            ui.show_info("No prior spec found; spec.json removed.")
+
+    # Record this rollback in history
+    outcome = "success" if rollback_result.all_succeeded else "partial"
     registry.record_action(
         project_path=cwd,
         action_type=ActionType.ROLLBACK,
-        result="recorded",
+        commands_run=[r.command for r in rollback_result.results],
+        result=outcome,
         trigger_error=f"Rollback of {target.id}",
     )
 
-    ui.show_success(f"Rollback of {target.id} recorded.")
-    ui.show_info("Note: Automatic command reversal coming soon. For now, review the commands above.")
+    if rollback_result.all_succeeded:
+        ui.show_success(f"Rollback of '{target.id}' completed successfully.")
+    else:
+        ui.show_warning(
+            "Rollback completed with errors. Some commands failed — check output above."
+        )
+        if rollback_result.first_error:
+            ui.show_info(f"First error: {rollback_result.first_error.stderr[:200]}")
+        raise typer.Exit(1)
 
 
 # ── modules ─────────────────────────────────────────────────────
