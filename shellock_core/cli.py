@@ -264,6 +264,15 @@ def init(
     if not spec.env_path:
         spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
 
+    # Let user rename before proceeding (skip if --name or --yes was given)
+    if not yes and not name:
+        ui.show_info(f"Environment name: {spec.env_id}")
+        if typer.confirm("Edit name?", default=False):
+            entered = typer.prompt("New name").strip()
+            if entered:
+                spec.env_id = _sanitize_env_id(entered)
+                spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
+
     # Check if environment already exists
     if Path(spec.env_path).is_dir() and not dry_run:
         if yes:
