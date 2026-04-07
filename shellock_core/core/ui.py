@@ -85,6 +85,13 @@ def _plain_profile(
     logical = sys_info.cpu_logical_cores or "unknown"
     physical = sys_info.cpu_physical_cores or "unknown"
     print(f"CPU: {cpu_description} ({logical} logical / {physical} physical)")
+    if sys_info.gpu_info:
+        gpu_description = sys_info.gpu_info
+    elif sys_info.cuda_available or sys_info.mps_available:
+        gpu_description = "detected (name unavailable)"
+    else:
+        gpu_description = "none detected"
+    print(f"GPU: {gpu_description}")
     accel_tags = []
     if sys_info.gpu_info:
         accel_tags.append(sys_info.gpu_info)
@@ -537,6 +544,13 @@ def show_profile(
 
     cpu_line = sys_info.cpu_info or "unknown CPU"
     hardware_lines = [f"[dim]CPU:[/] {cpu_line}"]
+    if sys_info.gpu_info:
+        gpu_line = sys_info.gpu_info
+    elif sys_info.cuda_available or sys_info.mps_available:
+        gpu_line = "detected (name unavailable)"
+    else:
+        gpu_line = "none detected"
+    hardware_lines.append(f"[dim]GPU:[/] {gpu_line}")
     if sys_info.cpu_logical_cores is not None:
         hardware_lines.append(f"[dim]Logical cores:[/] {sys_info.cpu_logical_cores}")
     if sys_info.cpu_physical_cores is not None:
