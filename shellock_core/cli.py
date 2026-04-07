@@ -608,8 +608,11 @@ def profile() -> None:
     """Show what preferences and errors Shellock has recorded."""
     from shellock_core.core import registry, ui
 
+    from shellock_core.core.context import detect_system
+
     cwd = os.getcwd()
     profile = registry.load_profile()
+    profile.system = detect_system()
     history = registry.load_history(cwd)
     spec = registry.load_spec(cwd)
 

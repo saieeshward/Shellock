@@ -203,9 +203,22 @@ def _has_internet(host: str = "1.1.1.1", port: int = 443, timeout: float = 2.0) 
 def _detect_cpu_model() -> str:
     """Try to report the CPU brand string."""
     if sys.platform == "darwin":
+        # Intel Mac
         try:
             result = subprocess.run(
                 ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        # Apple Silicon — machdep.cpu.brand_string doesn't exist on ARM
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.model"],
                 capture_output=True,
                 text=True,
                 timeout=2,
