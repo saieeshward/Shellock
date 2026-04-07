@@ -223,6 +223,20 @@ def _detect_cpu_model() -> str:
         except FileNotFoundError:
             pass
     elif os.name == "nt":
+        # Try registry first — works on all modern Windows without wmic
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            )
+            name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            winreg.CloseKey(key)
+            if name and name.strip():
+                return name.strip()
+        except Exception:
+            pass
+        # wmic fallback (deprecated on Windows 11 but may still work)
         try:
             result = subprocess.run(
                 ["wmic", "cpu", "get", "name"],

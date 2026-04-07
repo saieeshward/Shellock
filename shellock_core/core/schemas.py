@@ -187,6 +187,8 @@ class SystemInfo(BaseModel):
     gpu_info: str | None = Field(default=None, description="Detected GPU or accelerator")
     cuda_available: bool = Field(default=False, description="Is CUDA available via torch?")
     mps_available: bool = Field(default=False, description="Is Apple MPS available?")
+    gpu: str = Field(default="none", description="GPU type: cuda | mps | none")
+    vram_gb: float | None = Field(default=None, description="GPU VRAM in GiB")
 
 
 class UserProfile(BaseModel):
