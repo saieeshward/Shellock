@@ -606,7 +606,9 @@ def list_history() -> None:
 @app.command()
 def profile() -> None:
     """Show what preferences and errors Shellock has recorded."""
-    from shellock_core.core import registry, ui
+    from shellock_core.core import context, registry, ui
+
+    from shellock_core.core.context import detect_system
 
     from shellock_core.core.context import detect_system
 
@@ -615,6 +617,15 @@ def profile() -> None:
     profile.system = detect_system()
     history = registry.load_history(cwd)
     spec = registry.load_spec(cwd)
+
+    # Refresh hardware info live — the saved profile may be stale
+    live_sys = context.detect_system()
+    profile.system.gpu_info = live_sys.gpu_info
+    profile.system.cuda_available = live_sys.cuda_available
+    profile.system.mps_available = live_sys.mps_available
+    profile.system.cpu_info = live_sys.cpu_info
+    profile.system.cpu_logical_cores = live_sys.cpu_logical_cores
+    profile.system.cpu_physical_cores = live_sys.cpu_physical_cores
 
     ui.show_profile(profile, history, spec)
 

@@ -203,28 +203,33 @@ def _has_internet(host: str = "1.1.1.1", port: int = 443, timeout: float = 2.0) 
 def _detect_cpu_model() -> str:
     """Try to report the CPU brand string."""
     if sys.platform == "darwin":
-        # Intel Mac
+        # Intel Mac: brand string is in machdep.cpu.brand_string
         try:
             result = subprocess.run(
                 ["sysctl", "-n", "machdep.cpu.brand_string"],
-                capture_output=True,
-                text=True,
-                timeout=2,
+                capture_output=True, text=True, timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
-        # Apple Silicon — machdep.cpu.brand_string doesn't exist on ARM
+        # Apple Silicon: use hw.model (e.g. "Apple M2 Pro")
         try:
             result = subprocess.run(
                 ["sysctl", "-n", "hw.model"],
-                capture_output=True,
-                text=True,
-                timeout=2,
+                capture_output=True, text=True, timeout=2,
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+            model = result.stdout.strip()
+            if result.returncode == 0 and model:
+                # hw.model gives e.g. "Mac14,3"; try system_profiler for human name
+                sp = subprocess.run(
+                    ["system_profiler", "SPHardwareDataType"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in sp.stdout.splitlines():
+                    if "Chip:" in line or "Processor Name:" in line:
+                        return line.split(":", 1)[1].strip()
+                return model
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
     elif sys.platform.startswith("linux"):
@@ -236,6 +241,20 @@ def _detect_cpu_model() -> str:
         except FileNotFoundError:
             pass
     elif os.name == "nt":
+        # Try registry first — works on all modern Windows without wmic
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            )
+            name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            winreg.CloseKey(key)
+            if name and name.strip():
+                return name.strip()
+        except Exception:
+            pass
+        # wmic fallback (deprecated on Windows 11 but may still work)
         try:
             result = subprocess.run(
                 ["wmic", "cpu", "get", "name"],
@@ -319,9 +338,7 @@ def _detect_accelerators() -> tuple[str | None, bool, bool]:
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True,
-                text=True,
-                timeout=3,
+                capture_output=True, text=True, timeout=3,
             )
             if result.returncode == 0:
                 names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -330,5 +347,11 @@ def _detect_accelerators() -> tuple[str | None, bool, bool]:
                     cuda_available = True
         except Exception:
             pass
+
+    # MPS fallback: Apple Silicon without torch installed
+    if not mps_available and sys.platform == "darwin" and platform.machine() == "arm64":
+        mps_available = True
+        if not gpu_info:
+            gpu_info = "Apple MPS"
 
     return gpu_info, cuda_available, mps_available
