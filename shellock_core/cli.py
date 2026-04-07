@@ -22,9 +22,17 @@ from shellock_core import __version__
 app = typer.Typer(
     name="shellock",
     help="Adaptive Terminal Environment Orchestrator",
-    no_args_is_help=True,
+    no_args_is_help=False,
     add_completion=False,
+    invoke_without_command=True,
 )
+
+
+@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        typer.echo("Run 'shellock --help' to see available commands.")
+        raise typer.Exit()
 
 
 def _check_onboarding() -> None:
@@ -885,166 +893,6 @@ def info(
             ui.show_info(f"  ... and {len(pkgs) - 10} more")
 
 
-# ── export ─────────────────────────────────────────────────────
-
-
-@app.command(name="export")
-def export_env(
-    env_name: Optional[str] = typer.Argument(None, help="Environment name"),
-    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
-) -> None:
-    """Export an environment spec to a portable JSON file."""
-    import json as _json
-    from shellock_core.core import registry, ui
-
-    cwd = os.getcwd()
-    spec = registry.load_spec(cwd)
-    if spec is None:
-        ui.show_error("No Shellock environment found in this directory.")
-        raise typer.Exit(1)
-
-    export_data = spec.model_dump(mode="json")
-    export_data.pop("approved", None)
-    export_data.pop("created_at", None)
-
-    out_path = output or f"shellock-{spec.env_id}.json"
-    Path(out_path).write_text(_json.dumps(export_data, indent=2) + "\n")
-    ui.show_success(f"Exported to {out_path}")
-
-
-# ── import ─────────────────────────────────────────────────────
-
-
-@app.command(name="import")
-def import_env(
-    file_path: str = typer.Argument(..., help="Path to exported shellock JSON file"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Override environment name"),
-) -> None:
-    """Import an environment from an exported JSON file."""
-    import json as _json
-    from shellock_core.core import registry, ui
-    from shellock_core.core.schemas import EnvSpec
-
-    path = Path(file_path)
-    if not path.exists():
-        ui.show_error(f"File not found: {file_path}")
-        raise typer.Exit(1)
-
-    try:
-        data = _json.loads(path.read_text())
-        if name:
-            data["env_id"] = _sanitize_env_id(name)
-        spec = EnvSpec.model_validate(data)
-    except Exception as e:
-        ui.show_error(f"Invalid spec file: {e}")
-        raise typer.Exit(1)
-
-    ui.show_info(f"Importing environment: {spec.env_id} ({spec.module})")
-    if spec.packages:
-        ui.show_info(f"Packages: {', '.join(p.name for p in spec.packages)}")
-
-    # Delegate to init with the spec's data
-    init(
-        description=spec.reasoning or f"Imported {spec.env_id}",
-        module=spec.module,
-        name=spec.env_id,
-        template=None,
-        dry_run=False,
-        yes=False,
-    )
-
-
-# ── scan ───────────────────────────────────────────────────────
-
-
-@app.command()
-def scan(
-    env_name: Optional[str] = typer.Argument(None, help="Environment name"),
-) -> None:
-    """Run a security scan on an environment."""
-    from shellock_core.core import registry, ui
-
-    if env_name:
-        env_path = str(Path.home() / ".shellock" / "envs" / env_name)
-        module_name = "python"  # default guess
-    else:
-        cwd = os.getcwd()
-        spec = registry.load_spec(cwd)
-        if spec and spec.env_path:
-            env_path = spec.env_path
-            module_name = spec.module
-        else:
-            ui.show_error("No environment found. Provide a name or run from a Shellock project.")
-            raise typer.Exit(1)
-
-    ui.show_info(f"Scanning {env_path}...")
-    results = registry.run_security_scan(env_path, module_name)
-
-    if not results.get("scanned"):
-        ui.show_warning("Could not run security scan. Install pip-audit or ensure npm is available.")
-        return
-
-    vulns = results.get("vulnerabilities", [])
-    if vulns:
-        ui.show_warning(f"Found {len(vulns)} issue(s) via {results['tool']}:")
-        for v in vulns:
-            if isinstance(v, dict):
-                name = v.get("name", v.get("issue", "unknown"))
-                sev = v.get("severity", "")
-                ui.show_info(f"  - {name}" + (f" ({sev})" if sev else ""))
-    else:
-        ui.show_success(f"No vulnerabilities found ({results['tool']})")
-
-
-# ── adopt ──────────────────────────────────────────────────────
-
-
-@app.command()
-def adopt(
-    env_path: str = typer.Argument(..., help="Path to existing virtual environment"),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Name for the adopted environment"),
-) -> None:
-    """Adopt an existing virtual environment into Shellock management."""
-    from shellock_core.core import registry, ui
-    from shellock_core.core.schemas import EnvSpec
-
-    path = Path(env_path).resolve()
-    if not path.is_dir():
-        ui.show_error(f"Directory not found: {env_path}")
-        raise typer.Exit(1)
-
-    # Verify it's a venv
-    has_pyvenv = (path / "pyvenv.cfg").exists()
-    has_node = (path / "package.json").exists()
-
-    if not has_pyvenv and not has_node:
-        ui.show_error("This doesn't look like a Python venv or Node project.")
-        raise typer.Exit(1)
-
-    env_name = name or _sanitize_env_id(path.name)
-    module_name = "python" if has_pyvenv else "node"
-
-    # Symlink or copy into shellock envs
-    target = Path.home() / ".shellock" / "envs" / env_name
-    if target.exists():
-        ui.show_error(f"Environment '{env_name}' already exists.")
-        raise typer.Exit(1)
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.symlink_to(path)
-
-    # Create spec
-    spec = EnvSpec(
-        env_id=env_name,
-        module=module_name,
-        env_path=str(path),
-        reasoning=f"Adopted from {env_path}",
-        approved=True,
-    )
-    registry.save_spec(os.getcwd(), spec)
-    ui.show_success(f"Adopted '{env_name}' ({module_name}) → {path}")
-
-
 # ── generate ───────────────────────────────────────────────────
 
 generate_app = typer.Typer(help="Generate Dockerfile or CI config from environment")
@@ -1184,35 +1032,39 @@ test:
     return "# Unsupported module\n"
 
 
-# ── setup (alias for init) ──────────────────────────────────────
-
-
-@app.command()
-def setup(
-    description: str = typer.Argument(
-        ..., help="Describe the environment you want, e.g. 'npm Next.js + Tailwind'"
-    ),
-    module: Optional[str] = typer.Option(
-        None, "--module", "-m", help="Force a specific module (auto-detected if omitted)"
-    ),
-    template: Optional[str] = typer.Option(
-        None, "--template", "-t", help="Use a template instead of LLM (no AI needed)"
-    ),
-    name: Optional[str] = typer.Option(
-        None, "--name", "-n", help="Explicitly name the environment"
-    ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen without executing"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve without prompts"),
-) -> None:
-    """Create a new environment (alias for 'init')."""
-    init(description=description, module=module, template=template, name=name, dry_run=dry_run, yes=yes)
-
-
 # ── Main ────────────────────────────────────────────────────────
 
 
+_COMMAND_ORDER = [
+    "init",
+    "use",
+    "fix",
+    "list",
+    "envs",
+    "info",
+    "profile",
+    "rollback",
+    "destroy",
+    "modules",
+    "generate",
+    "config",
+    "version",
+]
+
+
 def main() -> None:
-    app()
+    import typer.main as _typer_main
+
+    click_app = _typer_main.get_command(app)
+
+    def _ordered_commands(_ctx):
+        registered = list(click_app.commands.keys())
+        ordered = [c for c in _COMMAND_ORDER if c in registered]
+        remaining = [c for c in registered if c not in _COMMAND_ORDER]
+        return ordered + remaining
+
+    click_app.list_commands = _ordered_commands
+    click_app()
 
 
 if __name__ == "__main__":
