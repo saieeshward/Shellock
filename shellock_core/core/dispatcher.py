@@ -189,6 +189,43 @@ def execute_commands(
     return result
 
 
+def execute_rollback_commands(
+    commands: list[str],
+    cwd: str,
+) -> DispatchResult:
+    """Execute rollback commands directly, bypassing allowlist/blocked-pattern checks.
+
+    Rollback commands are emitted by trusted module code (not user input or
+    LLM output), so they do not go through validate_commands().  They are run
+    sequentially with best-effort semantics — all commands are attempted even
+    if one fails, to maximise the chance of a clean undo.
+    """
+    result = DispatchResult()
+    env = os.environ.copy()
+    total = len(commands)
+
+    for step, cmd_str in enumerate(commands, 1):
+        _show_progress(step, total, cmd_str)
+        logger.info("Rollback: executing %s", cmd_str)
+        cmd_result = _run_command(cmd_str, cwd, env)
+        result.results.append(cmd_result)
+
+        if not cmd_result.success:
+            result.all_succeeded = False
+            if result.first_error is None:
+                result.first_error = cmd_result
+            _show_step_result(False, cmd_str)
+            logger.warning(
+                "Rollback command failed (exit %d): %s\nstderr: %s",
+                cmd_result.exit_code, cmd_str, cmd_result.stderr[:200],
+            )
+            # Do NOT break — attempt remaining rollback commands (best-effort)
+        else:
+            _show_step_result(True, cmd_str)
+
+    return result
+
+
 def _run_command(
     command: str,
     cwd: str,

@@ -805,6 +805,42 @@ def show_warning(message: str) -> None:
     Console().print(f"  [yellow]⚠[/] {message}")
 
 
+def show_rollback_plan(action_id: str, action_type: str, commands: list[str]) -> bool:
+    """Show the rollback commands that will be executed and ask for confirmation.
+
+    Returns True if the user confirms, False to abort.
+    """
+    if _plain_mode():
+        print(f"\nRolling back action {action_id} ({action_type})")
+        print("Commands to execute:")
+        for cmd in commands:
+            print(f"  ! {cmd}")
+        r = input("\nProceed with rollback? [yes/no] → ").strip().lower()
+        return r in ("yes", "y")
+
+    from rich.console import Console
+    from rich.panel import Panel
+
+    console = Console()
+    console.print()
+    console.print(
+        Panel(
+            f"[bold magenta]Rollback Plan[/] — undoing [bold]{action_id}[/] ({action_type})",
+            border_style="magenta",
+            padding=(0, 2),
+        )
+    )
+    console.print()
+    console.print("  [bold]Commands to execute:[/]")
+    for cmd in commands:
+        console.print(f"    [red]![/] {cmd}")
+    console.print()
+    response = console.input(
+        "[yellow]Proceed with rollback?[/] [dim]\\[yes/no][/] → "
+    ).strip().lower()
+    return response in ("yes", "y")
+
+
 def show_adaptive(axis: str, message: str) -> None:
     """Display an adaptive behaviour announcement — makes decisions scrutable."""
     tag = {"preferences": "ADAPT:prefs", "error-patterns": "ADAPT:errors", "system": "ADAPT:sys"}.get(axis, f"ADAPT:{axis}")
