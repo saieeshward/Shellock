@@ -67,6 +67,7 @@ class PackageSpec(BaseModel):
     name: str
     version: str | None = None
     extras: list[str] = Field(default_factory=list)
+    reason: str | None = Field(default=None, description="Why this package was selected")
 
     def to_install_string(self) -> str:
         """Return pip/npm-style install string, e.g. 'fastapi>=0.100'."""

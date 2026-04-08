@@ -288,7 +288,10 @@ def show_explain(spec: EnvSpec) -> None:
         if spec.runtime_version:
             print(f"  Runtime {spec.runtime_version} was chosen based on your description.")
         if spec.packages:
-            print(f"  Packages: {', '.join(p.name for p in spec.packages)}")
+            print(f"\n  Packages:")
+            for p in spec.packages:
+                reason = f" — {p.reason}" if p.reason else ""
+                print(f"    • {p.to_install_string()}{reason}")
         print()
         return
 
@@ -312,8 +315,11 @@ def show_explain(spec: EnvSpec) -> None:
         )
 
     if spec.packages:
-        pkg_list = ", ".join(p.to_install_string() for p in spec.packages)
-        explanation_parts.append(f"[bold]Packages:[/] {pkg_list}")
+        pkg_lines = ["\n[bold]Packages:[/]"]
+        for p in spec.packages:
+            reason = f" [dim]— {p.reason}[/]" if p.reason else ""
+            pkg_lines.append(f"  • {p.to_install_string()}{reason}")
+        explanation_parts.append("\n".join(pkg_lines))
 
     if spec.env_path:
         explanation_parts.append(f"[bold]Environment path:[/] {spec.env_path}")
