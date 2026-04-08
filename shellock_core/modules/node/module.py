@@ -164,7 +164,7 @@ class NodeModule(ShellockModule):
     # ── Spec generation ─────────────────────────────────────────
 
     def build_spec(self, description: str, context: dict[str, Any]) -> dict[str, Any]:
-        packages = self._parse_packages_from_description(description)
+        from shellock_core.modules.node.templates import match_template
 
         words = re.findall(r'\w+', description.lower())
         env_id = f"node-{'-'.join(words[:3])}" if words else "node-default"
@@ -175,12 +175,25 @@ class NodeModule(ShellockModule):
         if version_match:
             runtime = version_match.group(1)
 
+        # Match a use-case template
+        tmpl = match_template(description)
+        if tmpl:
+            pkg_names = {p["name"] for p in tmpl["packages"]}
+            extra_names = self._parse_packages_from_description(description)
+            extra_pkgs = [{"name": p} for p in extra_names if p not in pkg_names]
+            packages = tmpl["packages"] + extra_pkgs
+            reasoning = f"Matched '{tmpl['label']}' template from your description."
+        else:
+            extra_names = self._parse_packages_from_description(description)
+            packages = [{"name": p} for p in extra_names]
+            reasoning = f"Parsed from description: '{description}'"
+
         return {
             "env_id": env_id,
             "module": "node",
             "runtime_version": runtime,
-            "packages": [{"name": p} for p in packages],
-            "reasoning": f"Parsed from description: '{description}'",
+            "packages": packages,
+            "reasoning": reasoning,
         }
 
     def validate_spec(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
