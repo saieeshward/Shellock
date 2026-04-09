@@ -222,6 +222,16 @@ def init(
                 )
                 ui.show_info("Falling back to template mode...")
                 spec_dict = active_module.build_spec(description, full_context)
+            else:
+                # Generate a focused, memorable name (overrides the spec's env_id)
+                if not name:
+                    pkg_names = [
+                        p["name"] if isinstance(p, dict) else str(p)
+                        for p in spec_dict.get("packages", [])
+                    ]
+                    better_name = llm.generate_env_name(description, pkg_names)
+                    if better_name:
+                        spec_dict["env_id"] = better_name
         else:
             import shutil
             if shutil.which("ollama"):
@@ -264,15 +274,6 @@ def init(
     # Ensure env_path is set
     if not spec.env_path:
         spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
-
-    # Let user rename before proceeding (skip if --name or --yes was given)
-    if not yes and not name:
-        ui.show_info(f"Environment name: {spec.env_id}")
-        if typer.confirm("Edit name?", default=False):
-            entered = typer.prompt("New name").strip()
-            if entered:
-                spec.env_id = _sanitize_env_id(entered)
-                spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
 
     # Check if environment already exists
     if Path(spec.env_path).is_dir() and not dry_run:

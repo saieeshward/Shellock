@@ -42,7 +42,7 @@ PROJECT STATE:
 
 RESPOND WITH ONLY VALID JSON matching this schema:
 {{
-    "env_id": "short-descriptive-id",
+    "env_id": "short-memorable-name",
     "module": "{module_name}",
     "runtime_version": "version or null",
     "packages": [
@@ -53,9 +53,26 @@ RESPOND WITH ONLY VALID JSON matching this schema:
     "reasoning": "Brief explanation of your choices"
 }}
 
+IMPORTANT — env_id naming rules:
+- Use 2-3 words in kebab-case (e.g. "fastapi-dev", "react-ts-app", "ml-research", "data-pipeline")
+- Make it descriptive of the project purpose, NOT generic
+- Avoid: "python-env", "my-project", "new-env", "shellock-env"
+
 USER REQUEST: {description}
 
 JSON:"""
+
+NAME_PROMPT = """Generate a short, memorable environment name.
+
+USER REQUEST: {description}
+PACKAGES: {packages}
+
+Rules:
+- 2-3 words in kebab-case (lowercase, hyphens only — no underscores or spaces)
+- Descriptive of purpose: e.g. "fastapi-dev", "react-ts-app", "ml-research", "data-pipeline"
+- NOT generic: avoid "python-env", "my-project", "new-environment", "env-1"
+
+Respond with ONLY the name on a single line, nothing else:"""
 
 ERROR_PROMPT = """You are Shellock, an environment error diagnostician.
 Analyse this error and propose a fix as JSON.
@@ -142,6 +159,27 @@ class LLMClient:
             description=description,
         )
         return self._generate_with_retry(prompt)
+
+    def generate_env_name(self, description: str, packages: list[str]) -> str | None:
+        """Generate a short, memorable environment name from a description.
+
+        Returns a sanitized kebab-case name, or None if the LLM fails.
+        """
+        import re
+
+        prompt = NAME_PROMPT.format(
+            description=description,
+            packages=", ".join(packages) if packages else "none specified",
+        )
+        raw = self._call_llm(prompt)
+        if not raw:
+            return None
+        # Take the first line, strip whitespace, lowercase
+        name = raw.strip().split("\n")[0].strip().lower()
+        # Only accept valid kebab-case names of reasonable length
+        if re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$", name) and 3 <= len(name) <= 40:
+            return name
+        return None
 
     def diagnose_error(
         self,
