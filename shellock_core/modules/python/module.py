@@ -114,7 +114,8 @@ class PythonModule(ShellockModule):
         for dist in importlib.metadata.distributions():
             name = dist.metadata["Name"]
             version = dist.metadata["Version"]
-            result["installed_packages"][name.lower()] = version
+            if name is not None:
+                result["installed_packages"][name.lower()] = version
 
         # Check for pyenv-managed Python versions
         if result["pyenv_available"]:
@@ -451,6 +452,7 @@ class PythonModule(ShellockModule):
         all_packages = {
             d.metadata["Name"].lower()
             for d in importlib.metadata.distributions()
+            if d.metadata["Name"] is not None
         }
         close = difflib.get_close_matches(module_name.lower(), list(all_packages), n=3)
         if close:

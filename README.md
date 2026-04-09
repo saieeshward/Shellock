@@ -77,6 +77,23 @@ rm -rf .shellock/
 rm -rf ~/.shellock/
 ```
 
+## Uninstall
+
+To completely remove Shellock from your system:
+
+```bash
+# 1. Uninstall the package (removes the `shellock` CLI command)
+pip uninstall shellock
+
+# 2. Remove all Shellock global data (profile, config, envs, history)
+rm -rf ~/.shellock/
+
+# 3. Remove local project data (if inside a project that used shellock)
+rm -rf .shellock/
+```
+
+After these steps, `shellock` will no longer be available as a command and all stored environments, config, and history will be gone.
+
 ## Project Structure
 
 ```

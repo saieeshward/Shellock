@@ -299,7 +299,10 @@ def show_explain(spec: EnvSpec) -> None:
         if spec.env_path:
             print(f"  Path: {spec.env_path}")
         print()
-        input("Press Enter to continue...")
+        try:
+            input("Press Enter to continue...")
+        except (EOFError, OSError):
+            pass
         return
 
     from rich.console import Console
@@ -336,7 +339,60 @@ def show_explain(spec: EnvSpec) -> None:
             padding=(1, 2),
         )
     )
-    console.input("[dim]Press Enter to continue...[/]")
+    try:
+        console.input("[dim]Press Enter to continue...[/]")
+    except (EOFError, OSError):
+        pass
+
+
+def show_spec_diff(old_spec: EnvSpec, new_spec: EnvSpec) -> None:
+    """Show what changed between the existing spec and the new one."""
+    old_pkgs = {p.name for p in (old_spec.packages or [])}
+    new_pkgs = {p.name for p in (new_spec.packages or [])}
+    added = sorted(new_pkgs - old_pkgs)
+    removed = sorted(old_pkgs - new_pkgs)
+    name_changed = old_spec.env_id != new_spec.env_id
+    runtime_changed = old_spec.runtime_version != new_spec.runtime_version
+
+    if _plain_mode():
+        print("\n--- Re-init diff (existing spec found) ---")
+        if name_changed:
+            print(f"  Name:    {old_spec.env_id} → {new_spec.env_id}")
+        if runtime_changed:
+            print(f"  Runtime: {old_spec.runtime_version} → {new_spec.runtime_version}")
+        if added:
+            print(f"  + Added: {', '.join(added)}")
+        if removed:
+            print(f"  - Removed: {', '.join(removed)}")
+        if not any([name_changed, runtime_changed, added, removed]):
+            print("  (no changes detected)")
+        print()
+        return
+
+    from rich.console import Console
+    from rich.panel import Panel
+
+    console = Console()
+    console.print()
+    lines = []
+    if name_changed:
+        lines.append(f"[dim]Name:[/]    [yellow]{old_spec.env_id}[/] → [green]{new_spec.env_id}[/]")
+    if runtime_changed:
+        lines.append(f"[dim]Runtime:[/] [yellow]{old_spec.runtime_version}[/] → [green]{new_spec.runtime_version}[/]")
+    for p in added:
+        lines.append(f"[green]+ {p}[/]")
+    for p in removed:
+        lines.append(f"[red]- {p}[/]")
+    if not lines:
+        lines.append("[dim]No changes detected.[/]")
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="[yellow]Re-init — existing spec found[/]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
 
 
 def show_plan_preview(

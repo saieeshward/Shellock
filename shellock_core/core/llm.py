@@ -40,7 +40,7 @@ USER PREFERENCES:
 PROJECT STATE:
 {project_context}
 
-RESPOND WITH ONLY VALID JSON matching this schema:
+{few_shot_section}RESPOND WITH ONLY VALID JSON matching this schema:
 {{
     "env_id": "short-memorable-name",
     "module": "{module_name}",
@@ -118,9 +118,10 @@ class LLMClient:
     # Default cloud model for Gemini free tier via litellm
     CLOUD_MODEL = "gemini/gemini-2.0-flash"
 
-    def __init__(self, config: ShelllockConfig, tier: LLMTier) -> None:
+    def __init__(self, config: ShelllockConfig, tier: LLMTier, ollama_model: str | None = None) -> None:
         self.config = config
         self.tier = tier
+        self._ollama_model = ollama_model  # System-detected Ollama model; overrides config for LOCAL tier
         self._ollama_client = None
         self._litellm = None
 
@@ -145,18 +146,31 @@ class LLMClient:
         system_context: dict[str, Any],
         user_preferences: dict[str, Any],
         project_context: dict[str, Any],
+        few_shot_examples: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Convert natural language to an environment spec dict.
 
         Returns a validated dict on success, None if the LLM fails
         after MAX_RETRIES attempts.
         """
+        if few_shot_examples:
+            example_lines = ["PAST APPROVED ENVIRONMENTS (use as style examples):"]
+            for ex in few_shot_examples[:3]:
+                pkgs = ", ".join(p["name"] if isinstance(p, dict) else str(p) for p in ex.get("packages", []))
+                example_lines.append(
+                    f'  - {ex.get("env_id", "?")} | runtime={ex.get("runtime_version")} | packages={pkgs}'
+                )
+            few_shot_section = "\n".join(example_lines) + "\n\n"
+        else:
+            few_shot_section = ""
+
         prompt = SPEC_PROMPT.format(
             system_context=json.dumps(system_context, indent=2),
             user_preferences=json.dumps(user_preferences, indent=2),
             project_context=json.dumps(project_context, indent=2),
             module_name=module_name,
             description=description,
+            few_shot_section=few_shot_section,
         )
         return self._generate_with_retry(prompt)
 
@@ -246,8 +260,13 @@ class LLMClient:
         try:
             import ollama
 
+            # Use the system-detected Ollama model if available; fall back to config model.
+            # config.llm_model may hold a cloud model name (e.g. "gemini/gemini-1.5-flash")
+            # when the user configured a cloud provider but Ollama is also running.
+            model = self._ollama_model or self.config.llm_model
+
             response = ollama.generate(
-                model=self.config.llm_model,
+                model=model,
                 prompt=prompt,
                 options={"temperature": 0.1},  # low temp for structured output
             )
@@ -259,30 +278,81 @@ class LLMClient:
             logger.error("Ollama call failed: %s", e)
             return None
 
+    # Maximum seconds to wait before retrying a rate-limited request
+    _RATE_LIMIT_RETRY_MAX_WAIT = 30
+
     def _call_litellm(self, prompt: str) -> str | None:
-        """Call a cloud LLM via litellm (defaults to Gemini 2.0 Flash)."""
+        """Call a cloud LLM via litellm with quota-aware fallback.
+
+        Resolution order:
+            1. Primary model (config.llm_model)
+            2. On transient rate-limit (delay ≤ 30 s): wait, then retry primary
+            3. On quota exhaustion or retry failure: try fallback model/key
+               (config.llm_fallback_model + config.llm_fallback_key)
+        """
+        import re
+        import time
+
         try:
             import litellm
-
-            # Use Gemini model for cloud tier, unless user overrode in config
-            model = self.CLOUD_MODEL
-            if self.tier == LLMTier.CLOUD and self.config.llm_model and "gemini" not in self.config.llm_model:
-                # User set a custom cloud model — respect it
-                model = self.config.llm_model
-
-            response = litellm.completion(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                api_key=self.config.llm_api_key,
-                temperature=0.1,
-            )
-            return response.choices[0].message.content
         except ImportError:
             logger.error("litellm package not installed (pip install shellock[cloud])")
             return None
-        except Exception as e:
-            logger.error("Cloud LLM call failed: %s", e)
+
+        model = self.config.llm_model or self.CLOUD_MODEL
+
+        def _complete(m: str, key: str | None) -> str | None:
+            response = litellm.completion(
+                model=m,
+                messages=[{"role": "user", "content": prompt}],
+                api_key=key,
+                temperature=0.1,
+            )
+            return response.choices[0].message.content
+
+        def _retry_delay(exc: Exception) -> float | None:
+            """Extract retry delay in seconds from a RateLimitError, or None."""
+            text = str(exc)
+            m = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)s"', text)
+            if m:
+                return float(m.group(1))
+            m = re.search(r'retry in (\d+(?:\.\d+)?)s', text, re.IGNORECASE)
+            if m:
+                return float(m.group(1))
             return None
+
+        # ── Attempt 1: primary model ──────────────────────────────
+        try:
+            return _complete(model, self.config.llm_api_key)
+        except Exception as e:
+            err_str = str(e).lower()
+            is_rate_limit = "ratelimit" in err_str or "rate_limit" in err_str or "429" in err_str
+            is_quota = "quota" in err_str or "resource_exhausted" in err_str
+
+            if is_rate_limit and not is_quota:
+                # Transient rate limit — wait if delay is short, then retry primary
+                delay = _retry_delay(e)
+                if delay is not None and delay <= self._RATE_LIMIT_RETRY_MAX_WAIT:
+                    logger.warning("Rate limited; retrying primary in %.0fs", delay)
+                    time.sleep(delay)
+                    try:
+                        return _complete(model, self.config.llm_api_key)
+                    except Exception as e2:
+                        logger.error("Cloud LLM call failed after retry: %s", e2)
+                else:
+                    logger.error("Cloud LLM call failed: %s", e)
+            else:
+                logger.error("Cloud LLM call failed: %s", e)
+
+        # ── Attempt 2: fallback model/key ─────────────────────────
+        if self.config.llm_fallback_model and self.config.llm_fallback_key:
+            logger.info("Trying fallback cloud model: %s", self.config.llm_fallback_model)
+            try:
+                return _complete(self.config.llm_fallback_model, self.config.llm_fallback_key)
+            except Exception as e:
+                logger.error("Fallback cloud LLM call failed: %s", e)
+
+        return None
 
     def _check_ollama(self) -> bool:
         """Quick check if Ollama is responding."""
