@@ -7,6 +7,7 @@ Commands:
     shellock rollback [action_id] — undo an action
     shellock modules              — list available modules
     shellock config               — manage configuration
+    shellock why                  - explain previous changes in natural language
 """
 
 from __future__ import annotations
@@ -977,6 +978,132 @@ def info(
         if len(pkgs) > 10:
             ui.show_info(f"  ... and {len(pkgs) - 10} more")
 
+# ── why ───────────────────────────────────────────────────────
+
+def _explain_action_with_llm(
+    llm,
+    action_payload: dict,
+    recent_actions: list[dict] | None = None,
+) -> str | None:
+    """Use the configured LLM to explain one Shellock action."""
+    try:
+        return llm.explain_action(action_payload, recent_actions)
+    except Exception:
+        return None
+
+
+def _explain_action_without_llm(action: dict) -> str:
+    """Fallback natural-language explanation without an LLM."""
+    action_type = action.get("type", "unknown action")
+    result = action.get("result", "unknown")
+    commands = action.get("commands_run") or []
+    trigger_error = action.get("trigger_error")
+    diagnosis_method = action.get("diagnosis_method")
+    fix_applied = action.get("fix_applied")
+
+    lines = []
+
+    lines.append(f"Most recent Shellock action: {action_type}.")
+    lines.append(f"Result: {result}.")
+
+    if trigger_error:
+        lines.append(f"It was triggered by this error: {trigger_error}")
+
+    if diagnosis_method and diagnosis_method != "None":
+        lines.append(f"Shellock diagnosed it using: {diagnosis_method}.")
+
+    if fix_applied:
+        if isinstance(fix_applied, dict):
+            summary_parts = []
+
+            reason = fix_applied.get("reason") or fix_applied.get("summary") or fix_applied.get("description")
+            if reason:
+                summary_parts.append(f"Recorded reason: {reason}")
+
+            proposed_commands = fix_applied.get("commands")
+            if proposed_commands and proposed_commands != commands:
+                summary_parts.append(
+                    "Proposed commands: " + ", ".join(str(c) for c in proposed_commands)
+                )
+
+            if summary_parts:
+                lines.extend(summary_parts)
+
+    if commands:
+        lines.append("Commands run:")
+        lines.extend(f"  - {cmd}" for cmd in commands)
+    else:
+        lines.append("No commands were recorded for this action.")
+
+    if result != "success":
+        failed_stderr = action.get("failed_stderr")
+        if failed_stderr:
+            lines.append(f"Recorded error output: {failed_stderr[:300]}")
+
+    return "\n".join(lines)
+
+@app.command()
+def why() -> None:
+    """Explains the most recent Shellock change in natural language."""
+    from shellock_core.core import registry, ui, context
+    from shellock_core.core.llm import LLMClient
+    from shellock_core.core.schemas import ActionType
+
+    cwd = os.getcwd()
+    history = registry.load_history(cwd)
+
+    if not history.actions:
+        ui.show_error("No Shellock history found in this project.")
+        ui.show_info("Run 'shellock init' or 'shellock fix' first.")
+        raise typer.Exit(1)
+
+    # Prefer the most recent non-rollback action, since that is usually
+    # the thing the user wants explained.
+    last_action = next(
+        (a for a in reversed(history.actions) if a.type != ActionType.ROLLBACK),
+        None,
+    )
+
+    if last_action is None:
+        ui.show_error("No explainable action found in history.")
+        raise typer.Exit(1)
+
+    config = registry.load_config()
+    sys_context = context.detect_system()
+    llm = LLMClient(config, sys_context.llm_tier)
+
+    action_payload = {
+        "id": last_action.id,
+        "type": last_action.type.value if hasattr(last_action.type, "value") else str(last_action.type),
+        "timestamp": str(last_action.timestamp),
+        "result": last_action.result,
+        "trigger_error": last_action.trigger_error,
+        "commands_run": last_action.commands_run,
+        "rollback_commands": last_action.rollback_commands,
+        "failed_stderr": last_action.failed_stderr,
+        "error_fingerprint": last_action.error_fingerprint,
+        "fix_applied": last_action.fix_applied,
+        "caused_by": last_action.caused_by,
+        "diagnosis_method": (
+            last_action.diagnosis_method.value
+            if getattr(last_action, "diagnosis_method", None) and hasattr(last_action.diagnosis_method, "value")
+            else str(last_action.diagnosis_method)
+            if getattr(last_action, "diagnosis_method", None)
+            else None
+        ),
+        "spec": last_action.spec,
+    }
+
+    if llm.is_available():
+        explanation = _explain_action_with_llm(llm, action_payload)
+        if explanation:
+            ui.show_info(explanation)
+            return
+        else:
+            ui.show_warning("LLM explanation failed — showing built-in explanation instead.")
+
+    ui.show_info(_explain_action_without_llm(action_payload))
+
 
 # ── generate ───────────────────────────────────────────────────
 
@@ -1134,6 +1261,7 @@ _COMMAND_ORDER = [
     "generate",
     "config",
     "version",
+    "why",
 ]
 
 

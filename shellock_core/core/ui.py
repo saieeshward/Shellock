@@ -471,6 +471,7 @@ def show_history(actions: list[dict[str, Any]]) -> None:
         "add": ("cyan", "+ "),
         "remove": ("red", "- "),
         "rollback": ("magenta", "<-"),
+        "why": ("blue", "<-"),
     }
 
     console.print()
