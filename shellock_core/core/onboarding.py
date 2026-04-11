@@ -108,7 +108,7 @@ def run_onboarding() -> UserProfile:
 
     ui.show_info("")
     ui.show_success("Profile saved to ~/.shellock/profile.json")
-    ui.show_success("Ready. Run: shellock setup \"describe your project\"")
+    ui.show_success("Ready. Run: shellock init \"describe your project\"")
 
     return profile
 

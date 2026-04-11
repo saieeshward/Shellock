@@ -16,3 +16,4 @@ env/
 htmlcov/
 .mypy_cache/
 .DS_Store
+claude.md
