@@ -209,7 +209,8 @@ def show_approval(
         elif response in ("edit", "e"):
             return "edit"
         elif response in ("explain", "ex"):
-            return "explain"
+            show_explain(spec)
+            continue
         else:
             console.print(f"  [dim]Choose yes, no, edit, or explain.[/]")
 
@@ -1022,7 +1023,8 @@ def _plain_approval(
         elif r in ("edit", "e"):
             return "edit"
         elif r in ("explain", "ex"):
-            return "explain"
+            show_explain(spec)
+            continue
         else:
             print(f"  Choose yes, no, edit, or explain.")
 
