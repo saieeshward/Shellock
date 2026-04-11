@@ -266,7 +266,23 @@ def init(
         else:
             # Sanitize LLM-generated env_id too
             spec_dict["env_id"] = _sanitize_env_id(spec_dict.get("env_id", "shellock-env"))
-            
+            # Let the user rename before showing the approval screen
+            if not yes:
+                ui.show_info(f"Environment name: {spec_dict['env_id']}")
+                try:
+                    from rich.console import Console as _Con
+                    _r = _Con().input("Edit name? [y/N]: ").strip().lower()
+                except (ImportError, EOFError):
+                    _r = input("Edit name? [y/N]: ").strip().lower()
+                if _r in ("y", "yes"):
+                    try:
+                        from rich.console import Console as _Con
+                        _new = _Con().input("New name: ").strip()
+                    except (ImportError, EOFError):
+                        _new = input("New name: ").strip()
+                    if _new:
+                        spec_dict["env_id"] = _sanitize_env_id(_new)
+
         # Overwrite module with the strictly detected one to prevent LLM hallucinations
         spec_dict["module"] = active_module.name
 
@@ -294,17 +310,18 @@ def init(
     if not spec.env_path:
         spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
 
-    # Spec diff: if a spec already exists, show what changed and require confirmation
+    # Spec diff: if a spec already exists, show what changed
     existing_spec = registry.load_spec(cwd)
-    if existing_spec and not yes and not dry_run:
+    if existing_spec:
         ui.show_spec_diff(existing_spec, spec)
-        import typer as _typer
-        confirmed = _typer.confirm("Replace existing environment spec?", default=False)
-        if not confirmed:
-            ui.show_info("Cancelled.")
-            raise typer.Exit(0)
-    elif existing_spec and (yes or dry_run):
-        ui.show_spec_diff(existing_spec, spec)
+        # Only require explicit confirmation when re-initialising the *same* environment.
+        # Creating a new env (different name) is already gated by the approval screen below.
+        if existing_spec.env_id == spec.env_id and not yes and not dry_run:
+            import typer as _typer
+            confirmed = _typer.confirm("Replace existing environment spec?", default=False)
+            if not confirmed:
+                ui.show_info("Cancelled.")
+                raise typer.Exit(0)
 
     # Check if environment already exists
     if Path(spec.env_path).is_dir() and not dry_run:
@@ -362,9 +379,6 @@ def init(
                     active_module.allowed_commands,
                     active_module.blocked_patterns,
                 )
-                continue
-            elif result == "explain":
-                ui.show_explain(spec)
                 continue
     if not approved:
         ui.show_info("Cancelled.")
