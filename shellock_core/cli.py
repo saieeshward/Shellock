@@ -1269,6 +1269,100 @@ test:
     return "# Unsupported module\n"
 
 
+# ── uninstall ───────────────────────────────────────────────────
+
+
+def _cleanup_shell_rc() -> None:
+    """Remove the Shellock shell-integration snippet from .bashrc / .zshrc."""
+    from shellock_core.core import ui
+
+    for rc_file in (Path.home() / ".bashrc", Path.home() / ".zshrc"):
+        if not rc_file.exists():
+            continue
+        content = rc_file.read_text()
+        if "shellock_activate" not in content:
+            continue
+        # Strip everything from the marker comment through the closing } of
+        # shellock_deactivate (the two-function block written by onboarding).
+        cleaned = re.sub(
+            r"\n# Shellock shell integration\nshellock_activate\(\).*?shellock_deactivate\(\).*?\}\n",
+            "",
+            content,
+            flags=re.DOTALL,
+        )
+        if cleaned != content:
+            rc_file.write_text(cleaned)
+            ui.show_success(f"Removed shell integration from {rc_file.name}")
+
+
+@app.command()
+def uninstall(
+    yes: bool = typer.Option(False, "--yes", "-y", is_flag=True, help="Skip confirmation prompt"),
+    keep_data: bool = typer.Option(False, "--keep-data", help="Keep ~/.shellock/ data (profile, config, envs)"),
+) -> None:
+    """Remove Shellock global data and uninstall the package."""
+    import shutil as _shutil
+    import subprocess as _subprocess
+    from shellock_core.core import ui
+
+    shellock_dir = Path.home() / ".shellock"
+    local_dir = Path(os.getcwd()) / ".shellock"
+
+    # ── Preview what will be removed ────────────────────────────
+    ui.show_info("The following will be removed:")
+    if not keep_data and shellock_dir.is_dir():
+        ui.show_info(f"  • {shellock_dir}  (profile, config, all environments)")
+    if local_dir.is_dir():
+        ui.show_info(f"  • {local_dir}  (project history and spec)")
+    ui.show_info("  • shell integration snippet (if installed)")
+    ui.show_info("  • the shellock pip package")
+
+    # ── Confirm ─────────────────────────────────────────────────
+    if not yes:
+        try:
+            from rich.console import Console
+            r = Console().input(
+                "  [red]Proceed with uninstall?[/] [dim]\\[yes/no][/] → "
+            ).strip().lower()
+        except (ImportError, EOFError):
+            r = input("  Proceed with uninstall? [yes/no] → ").strip().lower()
+        if r not in ("yes", "y"):
+            ui.show_info("Cancelled.")
+            raise typer.Exit(0)
+
+    # ── Remove global data ───────────────────────────────────────
+    if not keep_data and shellock_dir.is_dir():
+        _shutil.rmtree(shellock_dir)
+        ui.show_success(f"Removed {shellock_dir}")
+    elif keep_data:
+        ui.show_info(f"Kept {shellock_dir} (--keep-data)")
+
+    # ── Remove local project data ────────────────────────────────
+    if local_dir.is_dir():
+        _shutil.rmtree(local_dir)
+        ui.show_success(f"Removed {local_dir}")
+
+    # ── Clean up shell rc files ──────────────────────────────────
+    _cleanup_shell_rc()
+
+    # ── Uninstall the pip package ────────────────────────────────
+    ui.show_info("Running: pip uninstall -y shellock")
+    try:
+        proc = _subprocess.run(
+            ["pip", "uninstall", "-y", "shellock"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            ui.show_success("Shellock package uninstalled.")
+        else:
+            ui.show_warning(f"pip uninstall returned an error: {proc.stderr.strip()[:200]}")
+    except Exception as exc:
+        ui.show_warning(f"Could not run pip uninstall: {exc}")
+
+    ui.show_success("Shellock has been uninstalled. Goodbye!")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 
@@ -1286,6 +1380,7 @@ _COMMAND_ORDER = [
     "generate",
     "config",
     "version",
+    "uninstall",
 ]
 
 
