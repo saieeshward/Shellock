@@ -128,6 +128,7 @@ def show_approval(
     spec: EnvSpec,
     commands: list[Command],
     warnings: list[dict[str, Any]] | None = None,
+    replacing: str | None = None,
 ) -> bool | str:
     """Display the environment spec AND commands in a single approval screen.
 
@@ -135,7 +136,7 @@ def show_approval(
     or "edit" / "explain" for those actions.
     """
     if _plain_mode():
-        return _plain_approval(spec, commands, warnings)
+        return _plain_approval(spec, commands, warnings, replacing)
 
     from rich.console import Console
     from rich.panel import Panel
@@ -157,6 +158,8 @@ def show_approval(
     table.add_column("Key", style="dim", width=16)
     table.add_column("Value")
     table.add_row("Name", f"[bold]{spec.env_id}[/]")
+    if replacing:
+        table.add_row("Replacing", f"[yellow]{replacing}[/]")
     if spec.runtime_version:
         table.add_row("Runtime", f"Python {spec.runtime_version}")
     if spec.packages:
@@ -349,64 +352,33 @@ def show_explain(spec: EnvSpec) -> None:
         pass
 
 
-def show_spec_diff(old_spec: EnvSpec, new_spec: EnvSpec) -> None:
-    """Show what changed between the existing spec and the new one."""
+def get_replacing_summary(old_spec: EnvSpec, new_spec: EnvSpec) -> str | None:
+    """Return a one-line summary of what the new spec is replacing, or None if nothing meaningful changed."""
     old_pkgs = {p.name for p in (old_spec.packages or [])}
     new_pkgs = {p.name for p in (new_spec.packages or [])}
     added = sorted(new_pkgs - old_pkgs)
     removed = sorted(old_pkgs - new_pkgs)
     name_changed = old_spec.env_id != new_spec.env_id
-    runtime_changed = old_spec.runtime_version != new_spec.runtime_version
 
-    if _plain_mode():
-        print("\n--- Re-init diff (existing spec found) ---")
-        if name_changed:
-            print(f"  Name:    {old_spec.env_id} → {new_spec.env_id}")
-        if runtime_changed:
-            print(f"  Runtime: {old_spec.runtime_version} → {new_spec.runtime_version}")
-        if added:
-            print(f"  + Added: {', '.join(added)}")
-        if removed:
-            print(f"  - Removed: {', '.join(removed)}")
-        if not any([name_changed, runtime_changed, added, removed]):
-            print("  (no changes detected)")
-        print()
-        return
-
-    from rich.console import Console
-    from rich.panel import Panel
-
-    console = Console()
-    console.print()
-    lines = []
-    if name_changed:
-        lines.append(f"[dim]Name:[/]    [yellow]{old_spec.env_id}[/] → [green]{new_spec.env_id}[/]")
-    if runtime_changed:
-        lines.append(f"[dim]Runtime:[/] [yellow]{old_spec.runtime_version}[/] → [green]{new_spec.runtime_version}[/]")
-    for p in added:
-        lines.append(f"[green]+ {p}[/]")
-    for p in removed:
-        lines.append(f"[red]- {p}[/]")
-    if not lines:
-        lines.append("[dim]No changes detected.[/]")
-    console.print(
-        Panel(
-            "\n".join(lines),
-            title="[yellow]Re-init — existing spec found[/]",
-            border_style="yellow",
-            padding=(1, 2),
-        )
-    )
+    parts = [old_spec.env_id]
+    if added:
+        parts.append(f"+ {', '.join(added)}")
+    if removed:
+        parts.append(f"- {', '.join(removed)}")
+    if name_changed or added or removed:
+        return "  ".join(parts)
+    return None
 
 
 def show_plan_preview(
     spec: EnvSpec,
     commands: list[Command],
     warnings: list[dict[str, Any]] | None = None,
+    replacing: str | None = None,
 ) -> None:
     """Display the spec + commands without asking for approval (--yes mode)."""
     if _plain_mode():
-        _plain_plan_display(spec, commands, warnings)
+        _plain_plan_display(spec, commands, warnings, replacing)
         return
 
     from rich.console import Console
@@ -427,6 +399,8 @@ def show_plan_preview(
     table.add_column("Key", style="dim", width=16)
     table.add_column("Value")
     table.add_row("Name", f"[bold]{spec.env_id}[/]")
+    if replacing:
+        table.add_row("Replacing", f"[yellow]{replacing}[/]")
     if spec.runtime_version:
         table.add_row("Runtime", f"Python {spec.runtime_version}")
     if spec.packages:
@@ -967,10 +941,13 @@ def _plain_plan_display(
     spec: EnvSpec,
     commands: list[Command],
     warnings: list[dict[str, Any]] | None = None,
+    replacing: str | None = None,
 ) -> None:
     """Plain-text plan display without prompting (used by --yes mode)."""
     print(f"\n--- Environment Plan ({spec.module}) [auto-approved] ---")
     print(f"  Name:     {spec.env_id}")
+    if replacing:
+        print(f"  Replacing: {replacing}")
     if spec.runtime_version:
         print(f"  Runtime:  {spec.runtime_version}")
     if spec.packages:
@@ -993,9 +970,12 @@ def _plain_approval(
     spec: EnvSpec,
     commands: list[Command],
     warnings: list[dict[str, Any]] | None = None,
+    replacing: str | None = None,
 ) -> bool | str:
     print(f"\n--- Environment Plan ({spec.module}) ---")
     print(f"  Name:     {spec.env_id}")
+    if replacing:
+        print(f"  Replacing: {replacing}")
     if spec.runtime_version:
         print(f"  Runtime:  Python {spec.runtime_version}")
     if spec.packages:

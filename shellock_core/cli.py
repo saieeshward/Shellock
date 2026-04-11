@@ -188,7 +188,7 @@ def init(
 
     # Axis 3: System context announcements (skip LLM tier if template mode)
     ctx_for_announce = sys_context.model_dump()
-    if template:
+    if template or (sys_context.llm_tier == LLMTier.CLOUD and not config.llm_api_key):
         ctx_for_announce = {**ctx_for_announce, "llm_tier": "template"}
     adaptive.announce_system_adaptations(ctx_for_announce, active_module.name)
 
@@ -310,10 +310,11 @@ def init(
     if not spec.env_path:
         spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
 
-    # Spec diff: if a spec already exists, show what changed
+    # Spec diff: if a spec already exists, capture summary for plan panel
     existing_spec = registry.load_spec(cwd)
+    replacing_summary = None
     if existing_spec:
-        ui.show_spec_diff(existing_spec, spec)
+        replacing_summary = ui.get_replacing_summary(existing_spec, spec)
         # Only require explicit confirmation when re-initialising the *same* environment.
         # Creating a new env (different name) is already gated by the approval screen below.
         if existing_spec.env_id == spec.env_id and not yes and not dry_run:
@@ -351,14 +352,14 @@ def init(
 
     # Single approval screen: spec + commands together (loop for edit/explain)
     if yes or dry_run:
-        ui.show_plan_preview(spec, validated, warnings)
+        ui.show_plan_preview(spec, validated, warnings, replacing=replacing_summary)
         if dry_run:
             ui.show_info("Dry run — no changes made.")
             return
         approved = True
     else:
         while True:
-            result = ui.show_approval(spec, validated, warnings)
+            result = ui.show_approval(spec, validated, warnings, replacing=replacing_summary)
             if result is True:
                 approved = True
                 break
