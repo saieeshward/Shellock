@@ -166,7 +166,8 @@ class NodeModule(ShellockModule):
     def build_spec(self, description: str, context: dict[str, Any]) -> dict[str, Any]:
         from shellock_core.modules.node.templates import match_template
 
-        words = re.findall(r'\w+', description.lower())
+        _stopwords = {"a", "an", "the", "with", "and", "for", "to", "in", "on", "of", "app", "application"}
+        words = [w for w in re.findall(r'\w+', description.lower()) if w not in _stopwords]
         env_id = f"node-{'-'.join(words[:3])}" if words else "node-default"
 
         # Detect Node version from description

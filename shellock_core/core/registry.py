@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 SHELLOCK_HOME = Path.home() / ".shellock"
 PROFILE_PATH = SHELLOCK_HOME / "profile.json"
 CONFIG_PATH = SHELLOCK_HOME / "config.json"
+LEARNED_FIXES_PATH = SHELLOCK_HOME / "knowledge" / "learned_fixes.json"
 
 
 def ensure_shellock_home() -> Path:
@@ -224,6 +225,41 @@ def load_spec(project_path: str) -> EnvSpec | None:
         data = json.loads(spec_file.read_text())
         return EnvSpec.model_validate(data)
     return None
+
+
+# ── Learned fixes (cross-project knowledge base) ───────────────
+
+
+def load_learned_fixes() -> dict[str, Any]:
+    """Load the global learned fixes knowledge base."""
+    ensure_shellock_home()
+    if LEARNED_FIXES_PATH.exists():
+        try:
+            return json.loads(LEARNED_FIXES_PATH.read_text())
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("Corrupted learned_fixes.json: %s — starting fresh", e)
+    return {}
+
+
+def lookup_learned_fix(fingerprint: str) -> dict[str, Any] | None:
+    """Return a previously learned fix for this error fingerprint, or None."""
+    fixes = load_learned_fixes()
+    entry = fixes.get(fingerprint)
+    return entry["fix"] if entry else None
+
+
+def save_learned_fix(fingerprint: str, fix: dict[str, Any], error_pattern: str) -> None:
+    """Record a successful fix in the global knowledge base."""
+    fixes = load_learned_fixes()
+    existing = fixes.get(fingerprint, {})
+    fixes[fingerprint] = {
+        "fix": fix,
+        "error_pattern": error_pattern[:120],
+        "learned_at": existing.get("learned_at") or datetime.now().isoformat(),
+        "last_used": datetime.now().isoformat(),
+        "success_count": existing.get("success_count", 0) + 1,
+    }
+    _write_json(LEARNED_FIXES_PATH, fixes)
 
 
 # ── Error fingerprinting ───────────────────────────────────────

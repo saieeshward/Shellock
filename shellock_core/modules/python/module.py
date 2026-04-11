@@ -114,7 +114,8 @@ class PythonModule(ShellockModule):
         for dist in importlib.metadata.distributions():
             name = dist.metadata["Name"]
             version = dist.metadata["Version"]
-            result["installed_packages"][name.lower()] = version
+            if name is not None:
+                result["installed_packages"][name.lower()] = version
 
         # Check for pyenv-managed Python versions
         if result["pyenv_available"]:
@@ -148,8 +149,9 @@ class PythonModule(ShellockModule):
         """Generate a Python env spec from description or template name."""
         from shellock_core.modules.python.templates import match_template
 
-        # Determine a reasonable env_id
-        words = re.findall(r'\w+', description.lower())
+        # Determine a reasonable env_id — skip stopwords for cleaner names
+        _stopwords = {"a", "an", "the", "with", "and", "for", "to", "in", "on", "of", "app", "application"}
+        words = [w for w in re.findall(r'\w+', description.lower()) if w not in _stopwords]
         env_id = f"py-{'-'.join(words[:3])}" if words else "py-default"
 
         # Detect Python version
@@ -463,6 +465,7 @@ class PythonModule(ShellockModule):
         all_packages = {
             d.metadata["Name"].lower()
             for d in importlib.metadata.distributions()
+            if d.metadata["Name"] is not None
         }
         close = difflib.get_close_matches(module_name.lower(), list(all_packages), n=3)
         if close:

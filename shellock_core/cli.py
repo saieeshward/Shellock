@@ -128,14 +128,12 @@ def init(
     module: Optional[str] = typer.Option(
         None, "--module", "-m", help="Force a specific module (auto-detected if omitted)"
     ),
-    template: Optional[str] = typer.Option(
-        None, "--template", "-t", help="Use a template instead of LLM (no AI needed)"
-    ),
+    template: bool = typer.Option(False, "--template", "-t", is_flag=True, help="Use template mode instead of LLM (no AI needed)"),
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Explicitly name the environment (overrides auto-generated name)"
     ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen without executing"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve without prompts"),
+    dry_run: bool = typer.Option(False, "--dry-run", is_flag=True, help="Show what would happen without executing"),
+    yes: bool = typer.Option(False, "--yes", "-y", is_flag=True, help="Auto-approve without prompts"),
 ) -> None:
     """Create a new environment from a natural-language description."""
     from shellock_core.core import adaptive, context, dispatcher, registry, ui
@@ -164,17 +162,23 @@ def init(
             raise typer.Exit(1)
         adaptive.announce_module_detection(active_module.name, f"forced via --module {module}")
     else:
+        from shellock_core.core.module_loader import discover_modules, load_module as _load_module
+        all_module_names = discover_modules()
         detected = detect_modules(cwd)
+        detected_names = {m.name for m in detected}
+
         if not detected:
-            # No trigger files found — infer module from description text
             active_module = _infer_module_from_description(description)
-            adaptive.announce_module_detection(active_module.name, "inferred from description text")
+            rejected = [(n, "no trigger files found") for n in all_module_names if n != active_module.name]
+            adaptive.announce_module_detection(active_module.name, "inferred from description text", rejected=rejected)
         elif len(detected) == 1:
             active_module = detected[0]
-            adaptive.announce_module_detection(active_module.name, f"detected trigger files in {cwd}")
+            rejected = [(n, "no trigger files found") for n in all_module_names if n not in detected_names]
+            adaptive.announce_module_detection(active_module.name, f"detected trigger files in {cwd}", rejected=rejected)
         else:
             active_module = detected[0]
-            adaptive.announce_module_detection(active_module.name, f"first of {len(detected)} detected modules")
+            rejected = [(m.name, "lower priority") for m in detected[1:]]
+            adaptive.announce_module_detection(active_module.name, f"first of {len(detected)} detected modules", rejected=rejected)
     ui.show_info(f"Module: {active_module.name}")
 
     # Gather context
@@ -182,8 +186,11 @@ def init(
     proj_context = context.detect_project_context(cwd)
     introspection = active_module.introspect(cwd)
 
-    # Axis 3: System context announcements
-    adaptive.announce_system_adaptations(sys_context.model_dump(), active_module.name)
+    # Axis 3: System context announcements (skip LLM tier if template mode)
+    ctx_for_announce = sys_context.model_dump()
+    if template:
+        ctx_for_announce = {**ctx_for_announce, "llm_tier": "template"}
+    adaptive.announce_system_adaptations(ctx_for_announce, active_module.name)
 
     full_context = {
         "system": sys_context.model_dump(),
@@ -193,24 +200,33 @@ def init(
 
     # Generate spec (LLM or template)
     if template:
-        spec_dict = active_module.build_spec(template, full_context)
+        spec_dict = active_module.build_spec(description, full_context)
     else:
-        llm = LLMClient(config, sys_context.llm_tier)
+        llm = LLMClient(config, sys_context.llm_tier, ollama_model=sys_context.llm_model if sys_context.llm_tier == LLMTier.LOCAL else None)
         if llm.is_available():
             # Show which LLM tier we're using
             if sys_context.llm_tier == LLMTier.LOCAL and llm._check_ollama():
-                ui.show_info(f"LLM: {config.llm_model} via Ollama (local)")
+                ui.show_info(f"LLM: {sys_context.llm_model} via Ollama (local)")
             elif config.llm_api_key:
-                ui.show_info(f"LLM: Gemini 2.0 Flash via cloud (free tier)")
+                fallback_note = f" → {config.llm_fallback_model} fallback" if config.llm_fallback_model else ""
+                ui.show_info(f"LLM: {config.llm_model} via cloud{fallback_note}")
             else:
                 tier_label = sys_context.llm_tier.value
                 ui.show_info(f"LLM: {config.llm_model} via {tier_label}")
+            # Gather last 3 approved specs as few-shot examples for the LLM
+            recent_actions = registry.get_recent_actions(cwd, n=10)
+            few_shot = [
+                a["spec"] for a in recent_actions
+                if a.get("type") == "init" and a.get("result") == "success" and a.get("spec")
+            ][-3:]
+
             spec_dict = llm.generate_spec(
                 description=description,
                 module_name=active_module.name,
                 system_context=sys_context.model_dump(),
                 user_preferences=profile.preferences,
                 project_context=proj_context,
+                few_shot_examples=few_shot or None,
             )
             if spec_dict is None:
                 ui.show_warning("LLM returned invalid spec — falling back to templates.")
@@ -222,6 +238,16 @@ def init(
                 )
                 ui.show_info("Falling back to template mode...")
                 spec_dict = active_module.build_spec(description, full_context)
+            else:
+                # Generate a focused, memorable name (overrides the spec's env_id)
+                if not name:
+                    pkg_names = [
+                        p["name"] if isinstance(p, dict) else str(p)
+                        for p in spec_dict.get("packages", [])
+                    ]
+                    better_name = llm.generate_env_name(description, pkg_names)
+                    if better_name:
+                        spec_dict["env_id"] = better_name
         else:
             import shutil
             if shutil.which("ollama"):
@@ -261,18 +287,24 @@ def init(
     for tool in suggested:
         spec.packages.append(PackageSpec(name=tool))
 
+    # Axis 3: Hardware-driven recommendations (GPU/CUDA/MPS)
+    adaptive.announce_hardware_adaptation(sys_context.model_dump(), [p.name for p in spec.packages])
+
     # Ensure env_path is set
     if not spec.env_path:
         spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
 
-    # Let user rename before proceeding (skip if --name or --yes was given)
-    if not yes and not name:
-        ui.show_info(f"Environment name: {spec.env_id}")
-        if typer.confirm("Edit name?", default=False):
-            entered = typer.prompt("New name").strip()
-            if entered:
-                spec.env_id = _sanitize_env_id(entered)
-                spec.env_path = str(Path.home() / ".shellock" / "envs" / spec.env_id)
+    # Spec diff: if a spec already exists, show what changed and require confirmation
+    existing_spec = registry.load_spec(cwd)
+    if existing_spec and not yes and not dry_run:
+        ui.show_spec_diff(existing_spec, spec)
+        import typer as _typer
+        confirmed = _typer.confirm("Replace existing environment spec?", default=False)
+        if not confirmed:
+            ui.show_info("Cancelled.")
+            raise typer.Exit(0)
+    elif existing_spec and (yes or dry_run):
+        ui.show_spec_diff(existing_spec, spec)
 
     # Check if environment already exists
     if Path(spec.env_path).is_dir() and not dry_run:
@@ -301,8 +333,11 @@ def init(
     )
 
     # Single approval screen: spec + commands together (loop for edit/explain)
-    if yes:
+    if yes or dry_run:
         ui.show_plan_preview(spec, validated, warnings)
+        if dry_run:
+            ui.show_info("Dry run — no changes made.")
+            return
         approved = True
     else:
         while True:
@@ -427,6 +462,7 @@ def fix(
         Command,
         DiagnosisMethod,
         DiagnosisResult,
+        LLMTier,
     )
 
     _check_onboarding()
@@ -496,16 +532,27 @@ def fix(
 
     diagnosis = None
 
-    # Layer 1: System introspection (instant, accurate)
-    ui.show_info("Diagnosing via system introspection...")
-    introspection_result = active_module.diagnose(error_text, error_context)
-    if introspection_result:
+    # Layer 0: Learned fixes — cross-project knowledge base (fastest)
+    learned_fix = adaptive.check_learned_fix(fingerprint)
+    if learned_fix:
         diagnosis = DiagnosisResult(
             diagnosed=True,
-            method=DiagnosisMethod.INTROSPECTION,
-            fix=introspection_result,
+            method=DiagnosisMethod.KNOWLEDGE_BASE,
+            fix=learned_fix,
             error_fingerprint=fingerprint,
         )
+
+    # Layer 1: System introspection (instant, accurate)
+    if not diagnosis:
+        ui.show_info("Diagnosing via system introspection...")
+        introspection_result = active_module.diagnose(error_text, error_context)
+        if introspection_result:
+            diagnosis = DiagnosisResult(
+                diagnosed=True,
+                method=DiagnosisMethod.INTROSPECTION,
+                fix=introspection_result,
+                error_fingerprint=fingerprint,
+            )
 
     # Layer 2: Built-in error patterns (fast, offline)
     if not diagnosis:
@@ -521,7 +568,7 @@ def fix(
 
     # Layer 3: LLM diagnosis (smart, slower)
     if not diagnosis:
-        llm = LLMClient(config, sys_context.llm_tier)
+        llm = LLMClient(config, sys_context.llm_tier, ollama_model=sys_context.llm_model if sys_context.llm_tier == LLMTier.LOCAL else None)
         if llm.is_available():
             tier_label = "Ollama (local)" if sys_context.llm_tier.value == "local" else sys_context.llm_tier.value
             ui.show_info(f"Consulting LLM ({config.llm_model} via {tier_label})...")
@@ -597,6 +644,8 @@ def fix(
             )
 
             if result.all_succeeded:
+                # Save to global learned fixes knowledge base
+                registry.save_learned_fix(fingerprint, diagnosis.fix, error_text[:120])
                 ui.show_success("Fix applied successfully")
             else:
                 ui.show_error("Fix failed. Check the output above.")
@@ -612,6 +661,77 @@ def fix(
 
 
 # ── list ────────────────────────────────────────────────────────
+
+
+@app.command()
+def why() -> None:
+    """Explain in plain English why the last action was set up the way it was."""
+    from shellock_core.core import context, registry, ui
+
+    cwd = os.getcwd()
+    history = registry.load_history(cwd)
+    profile = registry.load_profile()
+    sys_context = context.detect_system()
+
+    # Find last INIT action
+    last_init = next(
+        (a for a in reversed(history.actions) if a.type.value == "init" and a.spec),
+        None,
+    )
+    if not last_init:
+        ui.show_info("No 'shellock init' has been run in this project yet.")
+        raise typer.Exit(0)
+
+    spec = last_init.spec or {}
+    pkg_names = [p.get("name", "") if isinstance(p, dict) else str(p) for p in spec.get("packages", [])]
+
+    lines = [f"Last environment: [bold]{spec.get('env_id', '?')}[/] ({spec.get('module', '?')} module)"]
+
+    if spec.get("reasoning"):
+        lines.append(f"\n[bold]Why these packages:[/]\n  {spec['reasoning']}")
+
+    # Which preferences influenced it
+    influenced = []
+    for pkg in pkg_names:
+        count = profile.preferences.get("tools", {}).get(pkg, 0)
+        if count >= profile.suggestion_threshold:
+            influenced.append(f"[green]{pkg}[/] (used {count} times before — auto-suggested)")
+    if influenced:
+        lines.append("\n[bold]Preference-driven choices:[/]\n  " + "\n  ".join(influenced))
+
+    # System context signals
+    lines.append("\n[bold]Context signals detected:[/]")
+    lines.append(f"  OS: {sys_context.os} / {sys_context.arch}")
+    lines.append(f"  LLM: {sys_context.llm_tier.value} ({sys_context.llm_provider})")
+    if sys_context.cuda_available:
+        lines.append("  GPU: CUDA available")
+    elif sys_context.mps_available:
+        lines.append("  GPU: Apple MPS available")
+    else:
+        lines.append("  GPU: none detected")
+
+    # Counterfactuals
+    lines.append("\n[bold]What would have changed:[/]")
+    if sys_context.llm_tier.value == "local":
+        lines.append("  Without Ollama running → would have used cloud LLM or template mode")
+    if sys_context.mps_available or sys_context.cuda_available:
+        has_ml = any(p in {"torch", "tensorflow", "jax"} for p in pkg_names)
+        if not has_ml:
+            lines.append("  GPU detected but no ML packages requested → no GPU-specific changes made")
+    if not any(v >= profile.suggestion_threshold for v in profile.preferences.get("tools", {}).values()):
+        lines.append("  No tools above suggestion threshold → no automatic suggestions added")
+
+    import os as _os, re as _re
+    if _os.environ.get("SHELLOCK_PLAIN", "").strip() in ("1", "true", "yes"):
+        print("\n--- Why? ---")
+        for l in lines:
+            print(" ", _re.sub(r"\[.*?\]", "", l))
+        print()
+        return
+
+    from rich.console import Console
+    from rich.panel import Panel
+    Console().print(Panel("\n".join(lines), title="Why?", border_style="blue", padding=(1, 2)))
 
 
 @app.command(name="list")
@@ -667,7 +787,7 @@ def rollback(
     action_id: Optional[str] = typer.Argument(
         None, help="ID of the action to rollback (defaults to last non-rollback action)"
     ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    yes: bool = typer.Option(False, "--yes", "-y", is_flag=True, help="Skip confirmation prompt"),
 ) -> None:
     """Undo a previous action by executing its stored rollback commands."""
     from shellock_core.core import dispatcher, registry, ui
@@ -745,6 +865,24 @@ def rollback(
             if spec_file.exists():
                 spec_file.unlink()
             ui.show_info("No prior spec found; spec.json removed.")
+
+        # Decrement preference weights for tools in the rolled-back INIT action
+        if target.type == ActionType.INIT and target.spec:
+            profile = registry.load_profile()
+            active_mod_name = target.spec.get("module", "")
+            try:
+                from shellock_core.core.module_loader import get_module as _gm
+                rolled_module = _gm(active_mod_name)
+                for pkg in target.spec.get("packages", []):
+                    pkg_name = pkg.get("name", "") if isinstance(pkg, dict) else str(pkg)
+                    if pkg_name in rolled_module.suggestable_tools:
+                        cat = profile.preferences.get("tools", {})
+                        if cat.get(pkg_name, 0) > 0:
+                            cat[pkg_name] -= 1
+                            profile.preferences["tools"] = cat
+            except Exception:
+                pass
+            registry.save_profile(profile)
 
     # Record this rollback in history
     outcome = "success" if rollback_result.all_succeeded else "partial"

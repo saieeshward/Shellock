@@ -129,9 +129,50 @@ def announce_system_adaptations(
             )
 
 
-def announce_module_detection(module_name: str, reason: str) -> None:
-    """Announce which module was selected and why."""
-    ui.show_adaptive(
-        axis="system",
-        message=f"Selected '{module_name}' module — {reason}.",
-    )
+def announce_module_detection(
+    module_name: str,
+    reason: str,
+    rejected: list[tuple[str, str]] | None = None,
+) -> None:
+    """Announce which module was selected and why, and what was rejected."""
+    msg = f"Selected '{module_name}' module — {reason}."
+    if rejected:
+        rejected_str = ", ".join(f"{m} ({r})" for m, r in rejected)
+        msg += f" Rejected: {rejected_str}."
+    ui.show_adaptive(axis="system", message=msg)
+
+
+def announce_hardware_adaptation(sys_context: dict[str, Any], package_names: list[str]) -> None:
+    """Announce GPU-aware package suggestions when ML packages are detected."""
+    cuda = sys_context.get("cuda_available", False)
+    mps = sys_context.get("mps_available", False)
+    ml_packages = {"torch", "pytorch", "tensorflow", "tf", "jax", "flax"}
+    has_ml = any(p.lower() in ml_packages for p in package_names)
+
+    if not has_ml:
+        return
+
+    if cuda:
+        ui.show_adaptive(
+            axis="system",
+            message="CUDA GPU detected — consider 'torch' with CUDA support: pip install torch --index-url https://download.pytorch.org/whl/cu121",
+        )
+    elif mps:
+        ui.show_adaptive(
+            axis="system",
+            message="Apple MPS detected — PyTorch supports MPS acceleration natively. No extra install needed.",
+        )
+
+
+def check_learned_fix(error_fingerprint: str) -> dict[str, Any] | None:
+    """Check the global learned fixes knowledge base for a known solution.
+
+    Returns the fix dict if found, printing an adaptation announcement.
+    """
+    fix = registry.lookup_learned_fix(error_fingerprint)
+    if fix:
+        ui.show_adaptive(
+            axis="error-patterns",
+            message="[LEARNED] This fix worked before — reusing it across projects.",
+        )
+    return fix

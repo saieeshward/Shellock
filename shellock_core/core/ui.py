@@ -233,6 +233,15 @@ def _parse_package_string(pkg_str: str):
     return PackageSpec(name=pkg_str)
 
 
+def _sanitize_name(raw: str) -> str:
+    """Sanitize a user-entered env name to kebab-case."""
+    import re
+    s = raw.strip().lower()
+    s = re.sub(r"[^a-z0-9._-]", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-") or "shellock-env"
+
+
 def prompt_edit_spec(spec: EnvSpec) -> EnvSpec:
     """Let the user interactively edit key fields of the spec.
 
@@ -241,38 +250,36 @@ def prompt_edit_spec(spec: EnvSpec) -> EnvSpec:
     if _plain_mode():
         return _plain_edit_spec(spec)
 
+    from pathlib import Path as _Path
+
     from rich.console import Console
 
     console = Console()
     console.print()
-    console.print("  [bold]Edit spec[/] — press Enter to keep current value, or type a new one.")
+    console.print("  [bold]Edit environment[/]  [dim](press Enter to keep current value)[/]")
     console.print()
 
-    # env_id
-    new_id = console.input(f"  env_id [{spec.env_id}]: ").strip()
+    # Name
+    new_id = console.input(f"  [bold]Name[/]     [{spec.env_id}]: ").strip()
     if new_id:
-        spec.env_id = new_id
+        spec.env_id = _sanitize_name(new_id)
+        spec.env_path = str(_Path.home() / ".shellock" / "envs" / spec.env_id)
 
     # runtime_version
-    new_runtime = console.input(f"  runtime [{spec.runtime_version or 'auto'}]: ").strip()
+    new_runtime = console.input(f"  [bold]Runtime[/]  [{spec.runtime_version or 'auto'}]: ").strip()
     if new_runtime:
         spec.runtime_version = new_runtime
 
     # packages
     current_pkgs = ", ".join(p.to_install_string() for p in spec.packages) if spec.packages else "none"
-    console.print(f"  [dim]Current packages: {current_pkgs}[/]")
-    new_pkgs = console.input("  packages (comma-separated, or Enter to keep): ").strip()
+    console.print(f"  [dim]Packages: {current_pkgs}[/]")
+    new_pkgs = console.input("  [bold]Packages[/] (comma-separated, or Enter to keep): ").strip()
     if new_pkgs:
         parsed = [_parse_package_string(p) for p in new_pkgs.split(",")]
         spec.packages = [p for p in parsed if p is not None]
 
-    # Update env_path if env_id changed
-    from pathlib import Path as _Path
-    if new_id:
-        spec.env_path = str(_Path.home() / ".shellock" / "envs" / spec.env_id)
-
     console.print()
-    console.print("  [green]Spec updated.[/]")
+    console.print(f"  [green]✓[/] Name: [bold]{spec.env_id}[/]")
     return spec
 
 
@@ -288,11 +295,14 @@ def show_explain(spec: EnvSpec) -> None:
         if spec.runtime_version:
             print(f"  Runtime {spec.runtime_version} was chosen based on your description.")
         if spec.packages:
-            print(f"\n  Packages:")
-            for p in spec.packages:
-                reason = f" — {p.reason}" if p.reason else ""
-                print(f"    • {p.to_install_string()}{reason}")
+            print(f"  Packages: {', '.join(p.name for p in spec.packages)}")
+        if spec.env_path:
+            print(f"  Path: {spec.env_path}")
         print()
+        try:
+            input("Press Enter to continue...")
+        except (EOFError, OSError):
+            pass
         return
 
     from rich.console import Console
@@ -329,6 +339,60 @@ def show_explain(spec: EnvSpec) -> None:
             "\n".join(explanation_parts),
             title="Explanation",
             border_style="blue",
+            padding=(1, 2),
+        )
+    )
+    try:
+        console.input("[dim]Press Enter to continue...[/]")
+    except (EOFError, OSError):
+        pass
+
+
+def show_spec_diff(old_spec: EnvSpec, new_spec: EnvSpec) -> None:
+    """Show what changed between the existing spec and the new one."""
+    old_pkgs = {p.name for p in (old_spec.packages or [])}
+    new_pkgs = {p.name for p in (new_spec.packages or [])}
+    added = sorted(new_pkgs - old_pkgs)
+    removed = sorted(old_pkgs - new_pkgs)
+    name_changed = old_spec.env_id != new_spec.env_id
+    runtime_changed = old_spec.runtime_version != new_spec.runtime_version
+
+    if _plain_mode():
+        print("\n--- Re-init diff (existing spec found) ---")
+        if name_changed:
+            print(f"  Name:    {old_spec.env_id} → {new_spec.env_id}")
+        if runtime_changed:
+            print(f"  Runtime: {old_spec.runtime_version} → {new_spec.runtime_version}")
+        if added:
+            print(f"  + Added: {', '.join(added)}")
+        if removed:
+            print(f"  - Removed: {', '.join(removed)}")
+        if not any([name_changed, runtime_changed, added, removed]):
+            print("  (no changes detected)")
+        print()
+        return
+
+    from rich.console import Console
+    from rich.panel import Panel
+
+    console = Console()
+    console.print()
+    lines = []
+    if name_changed:
+        lines.append(f"[dim]Name:[/]    [yellow]{old_spec.env_id}[/] → [green]{new_spec.env_id}[/]")
+    if runtime_changed:
+        lines.append(f"[dim]Runtime:[/] [yellow]{old_spec.runtime_version}[/] → [green]{new_spec.runtime_version}[/]")
+    for p in added:
+        lines.append(f"[green]+ {p}[/]")
+    for p in removed:
+        lines.append(f"[red]- {p}[/]")
+    if not lines:
+        lines.append("[dim]No changes detected.[/]")
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="[yellow]Re-init — existing spec found[/]",
+            border_style="yellow",
             padding=(1, 2),
         )
     )
@@ -878,23 +942,23 @@ def prompt_activate(env_name: str) -> bool:
 
 def _plain_edit_spec(spec: EnvSpec) -> EnvSpec:
     """Plain-mode spec editing."""
-    print("\nEdit spec — press Enter to keep current value:")
-    new_id = input(f"  env_id [{spec.env_id}]: ").strip()
+    from pathlib import Path as _Path
+
+    print("\nEdit environment — press Enter to keep current value:")
+    new_id = input(f"  Name     [{spec.env_id}]: ").strip()
     if new_id:
-        spec.env_id = new_id
-    new_runtime = input(f"  runtime [{spec.runtime_version or 'auto'}]: ").strip()
+        spec.env_id = _sanitize_name(new_id)
+        spec.env_path = str(_Path.home() / ".shellock" / "envs" / spec.env_id)
+    new_runtime = input(f"  Runtime  [{spec.runtime_version or 'auto'}]: ").strip()
     if new_runtime:
         spec.runtime_version = new_runtime
     current_pkgs = ", ".join(p.to_install_string() for p in spec.packages) if spec.packages else "none"
-    print(f"  Current packages: {current_pkgs}")
-    new_pkgs = input("  packages (comma-separated, or Enter to keep): ").strip()
+    print(f"  Packages: {current_pkgs}")
+    new_pkgs = input("  Packages (comma-separated, or Enter to keep): ").strip()
     if new_pkgs:
         parsed = [_parse_package_string(p) for p in new_pkgs.split(",")]
         spec.packages = [p for p in parsed if p is not None]
-    if new_id:
-        from pathlib import Path as _Path
-        spec.env_path = str(_Path.home() / ".shellock" / "envs" / spec.env_id)
-    print("  Spec updated.\n")
+    print(f"  Name set to: {spec.env_id}\n")
     return spec
 
 

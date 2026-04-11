@@ -258,5 +258,7 @@ class ShelllockConfig(BaseModel):
     llm_provider: str = "ollama"
     llm_model: str = "llama3.2:3b"
     llm_api_key: str | None = Field(default=None, description="Only for cloud providers")
+    llm_fallback_model: str | None = Field(default=None, description="Secondary cloud model tried when primary hits quota (e.g. groq/llama-3.1-8b-instant)")
+    llm_fallback_key: str | None = Field(default=None, description="API key for the fallback cloud provider")
     plain_mode: bool = Field(default=False, description="Disable Rich formatting")
     history_compaction_threshold: int = 200
