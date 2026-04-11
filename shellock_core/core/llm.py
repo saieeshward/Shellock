@@ -46,11 +46,11 @@ PROJECT STATE:
     "module": "{module_name}",
     "runtime_version": "version or null",
     "packages": [
-        {{"name": "package-name", "version": null, "extras": []}}
+        {{"name": "package-name", "version": null, "extras": [], "reason": "why this package was chosen for the user's specific request (e.g. 'chosen for parsing HTML from scraped pages, as requested' not 'HTML parser'); reference what the user asked for"}}
     ],
     "env_vars": {{}},
     "post_hooks": [],
-    "reasoning": "Brief explanation of your choices"
+    "reasoning": "Brief explanation of your overall choices"
 }}
 
 IMPORTANT — env_id naming rules:

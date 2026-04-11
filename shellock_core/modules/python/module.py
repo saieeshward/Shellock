@@ -147,8 +147,7 @@ class PythonModule(ShellockModule):
 
     def build_spec(self, description: str, context: dict[str, Any]) -> dict[str, Any]:
         """Generate a Python env spec from description or template name."""
-        # Simple keyword-based spec generation (no LLM needed)
-        packages = self._parse_packages_from_description(description)
+        from shellock_core.modules.python.templates import match_template
 
         # Determine a reasonable env_id — skip stopwords for cleaner names
         _stopwords = {"a", "an", "the", "with", "and", "for", "to", "in", "on", "of", "app", "application"}
@@ -161,15 +160,28 @@ class PythonModule(ShellockModule):
         if version_match:
             runtime = version_match.group(1)
 
-        introspection = context.get("introspection", {})
+        # Match a use-case template
+        tmpl = match_template(description)
+        if tmpl:
+            # Start from template packages, then merge any explicitly named extras
+            pkg_names = {p["name"] for p in tmpl["packages"]}
+            extra_names = self._parse_packages_from_description(description)
+            extra_pkgs = [{"name": p} for p in extra_names if p not in pkg_names]
+            packages = tmpl["packages"] + extra_pkgs
+            reasoning = f"Matched '{tmpl['label']}' template from your description."
+        else:
+            # Fallback: keyword scan only
+            extra_names = self._parse_packages_from_description(description)
+            packages = [{"name": p} for p in extra_names]
+            reasoning = f"Parsed from description: '{description}'"
 
         return {
             "env_id": env_id,
             "module": "python",
             "runtime_version": runtime or f"{sys.version_info.major}.{sys.version_info.minor}",
-            "packages": [{"name": p} for p in packages],
+            "packages": packages,
             "env_path": str(Path.home() / ".shellock" / "envs" / env_id),
-            "reasoning": f"Parsed from description: '{description}'",
+            "reasoning": reasoning,
         }
 
     def validate_spec(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
