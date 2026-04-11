@@ -37,6 +37,7 @@ class ActionType(str, Enum):
     ADD = "add"
     REMOVE = "remove"
     ROLLBACK = "rollback"
+    WHY = "why"
 
 
 class DiagnosisMethod(str, Enum):

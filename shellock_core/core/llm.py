@@ -363,6 +363,34 @@ class LLMClient:
             return True
         except Exception:
             return False
+        
+    def explain_action(
+            self,
+            action_record: dict[str, Any],
+            recent_actions: list[dict[str, Any]] | None = None,
+        ) -> str | None:
+            prompt = f"""
+        You are explaining the most recent change made by a CLI environment repair tool called Shellock.
+
+        Explain this change in natural language for a developer.
+
+        Rules:
+        - Be concise but clear.
+        - Say what Shellock changed.
+        - Explain why it likely made that change.
+        - Mention whether it succeeded or failed.
+        - Do not invent actions, files, or reasons that are not supported by the data.
+        - If the action data is incomplete, say so briefly.
+        - Prefer plain English over jargon.
+
+        Action record:
+        {json.dumps(action_record, indent=2, default=str)}
+
+        Recent actions:
+        {json.dumps(recent_actions or [action_record], indent=2, default=str)}
+        """.strip()
+
+            return self._call_llm(prompt)
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:
