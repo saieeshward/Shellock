@@ -1,15 +1,17 @@
 """Onboarding flow — first-run setup.
 
-Runs once on first ``shellock`` invocation.  Three phases:
+Runs once on first ``shellock`` invocation.  Four phases:
     1. Automatic system detection (no questions)
     2. Module-driven preference questions
-    3. LLM provider selection
+    3. Local LLM setup (Ollama)
+    4. Cloud LLM setup (Gemini / OpenAI / Anthropic / Other)
 
-Total time: ~30 seconds, 3-5 questions, one-time only.
+Total time: ~30 seconds, one-time only.
 """
 
 from __future__ import annotations
 
+import shutil
 from typing import Any
 
 from shellock_core.core import context, registry, ui
@@ -43,8 +45,6 @@ def run_onboarding() -> UserProfile:
     else:
         ui.show_warning("No local LLM detected")
 
-    # Detect which modules are relevant
-    # (check current directory, but also just list what's available)
     available = discover_modules()
     ui.show_success(f"Available modules: {', '.join(available)}")
 
@@ -65,40 +65,16 @@ def run_onboarding() -> UserProfile:
             if answer:
                 profile.record_choice(q["key"], answer)
 
-    # ── Phase 3: LLM preference ────────────────────────────────
+    # ── Phase 3: Local LLM setup ────────────────────────────────
     config = registry.load_config()
+    ui.show_info("")
+    ui.show_info("── LLM Setup ─────────────────────────────────────────")
+    config = _setup_local_llm(system_info, config)
 
-    if system_info.llm_tier == LLMTier.LOCAL:
-        ui.show_info("")
-        model_str = f" with {system_info.llm_model}" if system_info.llm_model else ""
-        ui.show_info(f"LLM: {system_info.llm_provider}{model_str} detected")
+    # ── Phase 4: Cloud LLM setup ────────────────────────────────
+    config = _setup_cloud_llm(config)
 
-        from rich.console import Console
-        r = Console().input(
-            "  [dim]Use this model?[/] [dim]\\[yes / skip LLM][/] → "
-        ).strip().lower()
-
-        if r not in ("skip", "no", "n"):
-            config.llm_provider = system_info.llm_provider or "ollama"
-            if system_info.llm_model:
-                config.llm_model = system_info.llm_model
-    elif system_info.llm_tier == LLMTier.CLOUD:
-        ui.show_info("")
-        ui.show_info("No local LLM found, but internet is available.")
-        ui.show_info("Shellock can use Gemini 2.0 Flash (free) as a cloud fallback.")
-        config = _prompt_gemini_key(config)
-    else:
-        ui.show_info("")
-        ui.show_info("No LLM available. Running in template-only mode.")
-        ui.show_info("Install Ollama later for the full experience.")
-
-    # Also offer Gemini key if local LLM was found (as a fallback)
-    if system_info.llm_tier == LLMTier.LOCAL and not config.llm_api_key:
-        ui.show_info("")
-        ui.show_info("Optional: Add a Gemini API key for cloud fallback when Ollama is offline.")
-        config = _prompt_gemini_key(config)
-
-    # ── Phase 4: Shell activation function ────────────────────
+    # ── Phase 5: Shell activation function ────────────────────
     _offer_shell_activation(system_info.shell)
 
     # ── Save ────────────────────────────────────────────────────
@@ -111,6 +87,157 @@ def run_onboarding() -> UserProfile:
     ui.show_success("Ready. Run: shellock init \"describe your project\"")
 
     return profile
+
+
+# ── LLM setup helpers ───────────────────────────────────────────
+
+
+def _prompt(label: str) -> str:
+    """Single-line prompt with Rich fallback. Returns lowercased input."""
+    try:
+        from rich.console import Console
+        return Console().input(f"  [dim]{label}[/] → ").strip().lower()
+    except (ImportError, EOFError):
+        return input(f"  {label} → ").strip().lower()
+
+
+def _prompt_raw(label: str) -> str:
+    """Like _prompt but preserves original casing (for keys and model names)."""
+    try:
+        from rich.console import Console
+        return Console().input(f"  [dim]{label}[/] → ").strip()
+    except (ImportError, EOFError):
+        return input(f"  {label} → ").strip()
+
+
+def _setup_local_llm(system_info: Any, config: Any) -> Any:
+    """Step 1: Offer Ollama setup."""
+    ui.show_info("")
+    ui.show_info("Step 1/2 — Local LLM (private, offline, no API key needed)")
+
+    if system_info.llm_tier == LLMTier.LOCAL:
+        # Already running
+        model_str = f" ({system_info.llm_model})" if system_info.llm_model else ""
+        ui.show_success(f"Detected: {system_info.llm_provider}{model_str}")
+        r = _prompt("Use this for Shellock? [yes/skip]")
+        if r not in ("skip", "no", "n"):
+            config.llm_provider = system_info.llm_provider or "ollama"
+            if system_info.llm_model:
+                config.llm_model = system_info.llm_model
+            ui.show_success("Local LLM configured.")
+        return config
+
+    # Ollama installed but not running?
+    if shutil.which("ollama"):
+        ui.show_warning("Ollama is installed but not running.")
+        ui.show_info("  Start it with: ollama serve")
+        r = _prompt("Press Enter once running, or type 'skip'")
+        if r != "skip":
+            from shellock_core.core import context as _ctx
+            new_sys = _ctx.detect_system()
+            if new_sys.llm_tier == LLMTier.LOCAL:
+                config.llm_provider = new_sys.llm_provider or "ollama"
+                if new_sys.llm_model:
+                    config.llm_model = new_sys.llm_model
+                ui.show_success("Ollama connected.")
+            else:
+                ui.show_warning("Ollama not detected yet.")
+                ui.show_info("  Configure later: shellock config llm_provider ollama")
+        return config
+
+    # Not installed
+    ui.show_info("Ollama is not installed.")
+    r = _prompt("Install Ollama for private, offline AI? [yes/skip]")
+    if r in ("yes", "y"):
+        _show_ollama_install_steps(system_info.os)
+    else:
+        ui.show_info("  Skipped. Install later from https://ollama.com")
+
+    return config
+
+
+def _show_ollama_install_steps(os_name: str) -> None:
+    """Print OS-specific Ollama install instructions."""
+    ui.show_info("")
+    ui.show_info("  Ollama install steps:")
+    if "windows" in os_name.lower():
+        ui.show_info("    1. Download: https://ollama.com/download/OllamaSetup.exe")
+        ui.show_info("    2. Run the installer, then open a new terminal")
+        ui.show_info("    3. ollama pull llama3.2:3b")
+    elif "darwin" in os_name.lower():
+        ui.show_info("    1. brew install ollama")
+        ui.show_info("    2. ollama serve          ← run in a separate terminal")
+        ui.show_info("    3. ollama pull llama3.2:3b")
+    else:
+        ui.show_info("    1. curl -fsSL https://ollama.com/install.sh | sh")
+        ui.show_info("    2. ollama serve          ← run in a separate terminal")
+        ui.show_info("    3. ollama pull llama3.2:3b")
+    ui.show_info("")
+    ui.show_info("  After setup: shellock config llm_provider ollama")
+
+
+def _setup_cloud_llm(config: Any) -> Any:
+    """Step 2: Offer cloud LLM configuration with provider choice."""
+    ui.show_info("")
+    ui.show_info("Step 2/2 — Cloud LLM (used as fallback or primary)")
+
+    r = _prompt("Configure a cloud LLM? [yes/skip]")
+    if r not in ("yes", "y"):
+        ui.show_info("  Skipped. Add later: shellock config llm_api_key YOUR_KEY")
+        return config
+
+    # Provider menu
+    ui.show_info("")
+    ui.show_info("  Choose a provider:")
+    ui.show_info("    1. Gemini   — free tier  (aistudio.google.com/apikey)")
+    ui.show_info("    2. OpenAI   — GPT models  (platform.openai.com/api-keys)")
+    ui.show_info("    3. Anthropic — Claude models  (console.anthropic.com/settings/keys)")
+    ui.show_info("    4. Other    — any litellm-compatible provider")
+
+    choice = _prompt("Choose [1/2/3/4]")
+
+    providers = {
+        "1": ("gemini",    "gemini/gemini-2.5-flash",  "https://aistudio.google.com/apikey"),
+        "2": ("openai",    "gpt-4o-mini",               "https://platform.openai.com/api-keys"),
+        "3": ("anthropic", "anthropic/claude-haiku-4-5-20251001", "https://console.anthropic.com/settings/keys"),
+    }
+
+    if choice in providers:
+        provider, suggested_model, key_url = providers[choice]
+        ui.show_info(f"  Get your API key at: {key_url}")
+    elif choice == "4":
+        provider = _prompt_raw("Provider name (e.g. 'openai', 'groq')")
+        suggested_model = ""
+        key_url = ""
+    else:
+        ui.show_info("  Invalid choice — skipping cloud LLM setup.")
+        return config
+
+    # API key
+    key = _prompt_raw("Paste API key (Enter to skip)")
+    if not key:
+        ui.show_info("  Skipped.")
+        return config
+
+    # Model name — suggest but let user override (this is the critical fix)
+    if suggested_model:
+        model = _prompt_raw(f"Model name (Enter for '{suggested_model}', or type your own)")
+        model = model or suggested_model
+    else:
+        model = _prompt_raw("Model name (e.g. 'gemini/gemini-2.5-flash')")
+
+    if not model:
+        ui.show_warning("No model name provided — skipping cloud LLM.")
+        return config
+
+    config.llm_api_key = key
+    config.llm_provider = provider
+    config.llm_model = model
+    ui.show_success(f"Cloud LLM configured: {model} via {provider}")
+    return config
+
+
+# ── Shell integration ───────────────────────────────────────────
 
 
 SHELL_ACTIVATION_SNIPPET = '''
@@ -171,7 +298,6 @@ def _offer_shell_activation(shell: str) -> None:
         r = input(f"  Add to {rc_file.name}? [yes/no] → ").strip().lower()
 
     if r in ("yes", "y"):
-        # Check if already installed
         existing = rc_file.read_text() if rc_file.exists() else ""
         if "shellock_activate" in existing:
             ui.show_info("Shell functions already installed.")
@@ -184,26 +310,7 @@ def _offer_shell_activation(shell: str) -> None:
         ui.show_info("Skipped. You can add them manually later.")
 
 
-def _prompt_gemini_key(config: "ShelllockConfig") -> "ShelllockConfig":
-    """Prompt the user for a Gemini API key."""
-    from shellock_core.core.schemas import ShelllockConfig as _Cfg
-    try:
-        from rich.console import Console
-        key = Console().input(
-            "  [dim]Gemini API key (get free at https://aistudio.google.com/apikey)[/]\n"
-            "  [dim]Paste key or press Enter to skip:[/] → "
-        ).strip()
-    except (ImportError, EOFError):
-        key = input("  Gemini API key (Enter to skip): ").strip()
-
-    if key:
-        config.llm_api_key = key
-        config.llm_provider = "gemini"
-        config.llm_model = "gemini/gemini-2.0-flash"
-        ui.show_success("Gemini API key saved.")
-    else:
-        ui.show_info("Skipped. You can add it later: shellock config llm_api_key YOUR_KEY")
-    return config
+# ── Question helpers ─────────────────────────────────────────────
 
 
 def _ask_question(q: dict[str, Any]) -> str | None:
@@ -229,7 +336,6 @@ def _ask_question(q: dict[str, Any]) -> str | None:
     if not answer:
         return default
 
-    # Match partial input
     for opt in options:
         if opt.lower().startswith(answer):
             return opt

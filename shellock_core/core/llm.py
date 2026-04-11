@@ -116,7 +116,7 @@ class LLMClient:
     """
 
     # Default cloud model for Gemini free tier via litellm
-    CLOUD_MODEL = "gemini/gemini-2.0-flash"
+    CLOUD_MODEL = "gemini/gemini-2.5-flash"
 
     def __init__(self, config: ShelllockConfig, tier: LLMTier, ollama_model: str | None = None) -> None:
         self.config = config
