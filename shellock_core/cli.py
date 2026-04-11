@@ -128,12 +128,12 @@ def init(
     module: Optional[str] = typer.Option(
         None, "--module", "-m", help="Force a specific module (auto-detected if omitted)"
     ),
-    template: bool = typer.Option(False, "--template", "-t", is_flag=True, flag_value=True, help="Use template mode instead of LLM (no AI needed)"),
+    template: bool = typer.Option(False, "--template", "-t", is_flag=True, help="Use template mode instead of LLM (no AI needed)"),
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Explicitly name the environment (overrides auto-generated name)"
     ),
-    dry_run: bool = typer.Option(False, "--dry-run", is_flag=True, flag_value=True, help="Show what would happen without executing"),
-    yes: bool = typer.Option(False, "--yes", "-y", is_flag=True, flag_value=True, help="Auto-approve without prompts"),
+    dry_run: bool = typer.Option(False, "--dry-run", is_flag=True, help="Show what would happen without executing"),
+    yes: bool = typer.Option(False, "--yes", "-y", is_flag=True, help="Auto-approve without prompts"),
 ) -> None:
     """Create a new environment from a natural-language description."""
     from shellock_core.core import adaptive, context, dispatcher, registry, ui
@@ -186,8 +186,11 @@ def init(
     proj_context = context.detect_project_context(cwd)
     introspection = active_module.introspect(cwd)
 
-    # Axis 3: System context announcements
-    adaptive.announce_system_adaptations(sys_context.model_dump(), active_module.name)
+    # Axis 3: System context announcements (skip LLM tier if template mode)
+    ctx_for_announce = sys_context.model_dump()
+    if template:
+        ctx_for_announce = {**ctx_for_announce, "llm_tier": "template"}
+    adaptive.announce_system_adaptations(ctx_for_announce, active_module.name)
 
     full_context = {
         "system": sys_context.model_dump(),
@@ -293,14 +296,14 @@ def init(
 
     # Spec diff: if a spec already exists, show what changed and require confirmation
     existing_spec = registry.load_spec(cwd)
-    if existing_spec and not yes:
+    if existing_spec and not yes and not dry_run:
         ui.show_spec_diff(existing_spec, spec)
         import typer as _typer
         confirmed = _typer.confirm("Replace existing environment spec?", default=False)
         if not confirmed:
             ui.show_info("Cancelled.")
             raise typer.Exit(0)
-    elif existing_spec and yes:
+    elif existing_spec and (yes or dry_run):
         ui.show_spec_diff(existing_spec, spec)
 
     # Check if environment already exists
@@ -784,7 +787,7 @@ def rollback(
     action_id: Optional[str] = typer.Argument(
         None, help="ID of the action to rollback (defaults to last non-rollback action)"
     ),
-    yes: bool = typer.Option(False, "--yes", "-y", is_flag=True, flag_value=True, help="Skip confirmation prompt"),
+    yes: bool = typer.Option(False, "--yes", "-y", is_flag=True, help="Skip confirmation prompt"),
 ) -> None:
     """Undo a previous action by executing its stored rollback commands."""
     from shellock_core.core import dispatcher, registry, ui

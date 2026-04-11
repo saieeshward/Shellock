@@ -150,8 +150,9 @@ class PythonModule(ShellockModule):
         # Simple keyword-based spec generation (no LLM needed)
         packages = self._parse_packages_from_description(description)
 
-        # Determine a reasonable env_id
-        words = re.findall(r'\w+', description.lower())
+        # Determine a reasonable env_id — skip stopwords for cleaner names
+        _stopwords = {"a", "an", "the", "with", "and", "for", "to", "in", "on", "of", "app", "application"}
+        words = [w for w in re.findall(r'\w+', description.lower()) if w not in _stopwords]
         env_id = f"py-{'-'.join(words[:3])}" if words else "py-default"
 
         # Detect Python version
