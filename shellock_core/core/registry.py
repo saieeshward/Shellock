@@ -46,14 +46,18 @@ logger = logging.getLogger(__name__)
 SHELLOCK_HOME = Path.home() / ".shellock"
 PROFILE_PATH = SHELLOCK_HOME / "profile.json"
 CONFIG_PATH = SHELLOCK_HOME / "config.json"
-
+KNOWLEDGE_PATH = SHELLOCK_HOME / "knowledge"
+LEARNED_FIXES_PATH = SHELLOCK_HOME / "knowledge" / "learned.json"
 
 def ensure_shellock_home() -> Path:
     """Create ~/.shellock/ if it doesn't exist."""
     SHELLOCK_HOME.mkdir(parents=True, exist_ok=True)
-    (SHELLOCK_HOME / "knowledge").mkdir(exist_ok=True)
-    return SHELLOCK_HOME
+    KNOWLEDGE_PATH.mkdir(exist_ok=True)
 
+    if not LEARNED_FIXES_PATH.exists():
+        _write_json(LEARNED_FIXES_PATH, {"schema_version": "1.0", "fixes": {}})
+
+    return SHELLOCK_HOME
 
 def ensure_project_dir(project_path: str) -> Path:
     """Create <project>/.shellock/ if it doesn't exist."""
@@ -106,6 +110,113 @@ def save_config(config: ShelllockConfig) -> None:
     ensure_shellock_home()
     _write_json(CONFIG_PATH, config.model_dump(mode="json"))
 
+# ── Learned fixes ──────────────────────────────────────────────
+
+def load_learned_fixes() -> dict[str, Any]:
+    """Load globally learned successful fixes."""
+    ensure_shellock_home()
+    if LEARNED_FIXES_PATH.exists():
+        try:
+            return json.loads(LEARNED_FIXES_PATH.read_text())
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("Corrupted learned.json: %s — backing up and starting fresh", e)
+            _backup_corrupted(LEARNED_FIXES_PATH)
+    return {"schema_version": "1.0", "fixes": {}}
+
+
+def record_successful_fix(
+    error_fingerprint: str,
+    error_text: str,
+    fix_applied: dict[str, Any],
+    module_name: str | None = None,
+    project_path: str | None = None,
+    diagnosis_method: DiagnosisMethod | None = None,
+) -> None:
+    """Record a successful fix into the global learned fixes store."""
+    data = load_learned_fixes()
+    fixes = data.setdefault("fixes", {})
+
+    key = f"{module_name or 'any'}::{error_fingerprint}"
+
+    entry = fixes.setdefault(
+        key,
+        {
+            "error_fingerprint": error_fingerprint,
+            "module": module_name or "any",
+            "pattern": error_text[:200],
+            "count": 0,
+            "fix": fix_applied,
+            "project_path": project_path,
+            "diagnosis_method": diagnosis_method.value if diagnosis_method else None,
+            "recorded_at": None,
+            "successful_fixes": [],
+        },
+    )
+
+    entry["count"] += 1
+    entry["pattern"] = error_text[:200]
+    entry["fix"] = fix_applied
+    entry["project_path"] = project_path
+    entry["diagnosis_method"] = diagnosis_method.value if diagnosis_method else None
+    entry["recorded_at"] = datetime.now().isoformat()
+
+    fix_record = {
+        "fix": fix_applied,
+        "module": module_name or "any",
+        "project_path": project_path,
+        "diagnosis_method": diagnosis_method.value if diagnosis_method else None,
+        "recorded_at": datetime.now().isoformat(),
+    }
+
+    fix_key = json.dumps(
+        {
+            "fix": fix_record["fix"],
+            "module": fix_record["module"],
+            "diagnosis_method": fix_record["diagnosis_method"],
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+    existing_keys = {
+        json.dumps(
+            {
+                "fix": item.get("fix"),
+                "module": item.get("module"),
+                "diagnosis_method": item.get("diagnosis_method"),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        for item in entry["successful_fixes"]
+    }
+
+    if fix_key not in existing_keys:
+        entry["successful_fixes"].append(fix_record)
+
+    _write_json(LEARNED_FIXES_PATH, data)
+
+
+def get_learned_fix(
+    error_fingerprint: str,
+    module_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a previously successful fix for this fingerprint/module, if any."""
+    data = load_learned_fixes()
+    fixes = data.get("fixes", {})
+
+    if module_name:
+        key = f"{module_name}::{error_fingerprint}"
+        entry = fixes.get(key)
+        if entry and isinstance(entry.get("fix"), dict):
+            return entry["fix"]
+
+    key = f"any::{error_fingerprint}"
+    entry = fixes.get(key)
+    if entry and isinstance(entry.get("fix"), dict):
+        return entry["fix"]
+
+    return None
 
 # ── Project history ─────────────────────────────────────────────
 

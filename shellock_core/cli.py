@@ -519,7 +519,23 @@ def fix(
                 error_fingerprint=fingerprint,
             )
 
-    # Layer 3: LLM diagnosis (smart, slower)
+    # Layer 3: Learned successful fixes (reuse before asking the LLM)
+    if not diagnosis:
+        ui.show_info("Checking previous fixes...")
+        learned_fix = registry.get_learned_fix(
+            error_fingerprint=fingerprint,
+            module_name=spec.module,
+        )
+        if learned_fix:
+            ui.show_info("[LEARNED] This fix worked before")
+            diagnosis = DiagnosisResult(
+                diagnosed=True,
+                method=DiagnosisMethod.KNOWLEDGE_BASE,
+                fix=learned_fix,
+                error_fingerprint=fingerprint,
+            )
+
+    # Layer 4: LLM diagnosis (smart, slower)
     if not diagnosis:
         llm = LLMClient(config, sys_context.llm_tier)
         if llm.is_available():
@@ -542,7 +558,7 @@ def fix(
             if shutil.which("ollama"):
                 ui.show_info("Ollama is installed but not running — skipping LLM diagnosis. Start with: ollama serve")
 
-    # Layer 4: "I don't know"
+    # Layer 5: "I don't know"
     if not diagnosis:
         diagnosis = DiagnosisResult(
             diagnosed=False,
@@ -598,6 +614,17 @@ def fix(
 
             if result.all_succeeded:
                 ui.show_success("Fix applied successfully")
+
+                # record successful fixes to ~/.shellock/learned_fixes.json
+                registry.record_successful_fix(
+                    error_fingerprint=fingerprint,
+                    error_text=error_text,
+                    fix_applied=diagnosis.fix,
+                    module_name=spec.module,
+                    project_path=cwd,
+                    diagnosis_method=diagnosis.method,
+                )
+
             else:
                 ui.show_error("Fix failed. Check the output above.")
                 raise typer.Exit(1)
